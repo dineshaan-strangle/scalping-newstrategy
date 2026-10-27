@@ -27,19 +27,23 @@ def hdr(m, p, q="", b=""):
     return {"api-key": K, "timestamp": t, "signature": sig(m, t, p, q, b, S), "Content-Type": "application/json"}
 
 def price(s="BTCUSD"):
-    return float(requests.get(f"{B}/v2/tickers/{s}").json()['result']['mark_price'])
+    try:
+        return float(requests.get(f"{B}/v2/tickers/{s}").json()['result']['mark_price'])
+    except:
+        return 80000.0
 
 def order(d):
     p = "/v2/orders"
     b = json.dumps(d)
     h = hdr("POST", p, "", b)
     r = requests.post(B + p, headers=h, data=b)
-    print(r.text)
+    print(f"ORDER REQUEST: {b}")
+    print(f"ORDER RESPONSE: {r.text}")
     return r.json()
 
 def get_candles(resolution="5"):
     try:
-        r = requests.get(f"{B}/v2/chart/history?symbol=BTCUSD&resolution={resolution}&from=0&to=9999999999").json()
+        r = requests.get(f"{B}/v2/chart/history?symbol=BTCUSD&resolution={resolution}&from=0&to=9999999999", timeout=5).json()
         c = r['result']
         last = c[-1]
         return last['close'] > last['open']
@@ -47,10 +51,13 @@ def get_candles(resolution="5"):
         return False
 
 def set_lev(lev=20):
-    p = "/v2/products/27"
-    b = json.dumps({"leverage": str(lev)})
-    h = hdr("PUT", p, "", b)
-    requests.put(B + p, headers=h, data=b)
+    try:
+        p = "/v2/products/27"
+        b = json.dumps({"leverage": str(lev)})
+        h = hdr("PUT", p, "", b)
+        requests.put(B + p, headers=h, data=b, timeout=5)
+    except:
+        pass
 
 # --- COMMANDS ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -133,33 +140,42 @@ async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if q.data == "short_yes":
         sl = round(e * (1 + SL / 100), 1)
         tp = round(e * (1 - TP / 100), 1)
-        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order"})
-        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
-        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
-        await q.edit_message_text(f"SHORT DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+        res = order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order"})
+        if res.get('success'):
+            order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
+            order({"product_id": 27, "size": qty, "side": "buy", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
+            await q.edit_message_text(f"SHORT DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+        else:
+            await q.edit_message_text(f"ORDER FAILED\n{res}")
 
     if q.data == "long_yes":
         sl = round(e * (1 - SL / 100), 1)
         tp = round(e * (1 + TP / 100), 1)
-        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order"})
-        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
-        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
-        await q.edit_message_text(f"LONG DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+        res = order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order"})
+        if res.get('success'):
+            order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
+            order({"product_id": 27, "size": qty, "side": "sell", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
+            await q.edit_message_text(f"LONG DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+        else:
+            await q.edit_message_text(f"ORDER FAILED\n{res}")
 
 async def close_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    p = "/v2/orders/all"
-    b = json.dumps({"product_id": 27, "cancel_stop_orders": True, "cancel_limit_orders": True})
-    h = hdr("DELETE", p, "", b)
-    requests.delete(B + p, headers=h, data=b)
+    try:
+        p = "/v2/orders/all"
+        b = json.dumps({"product_id": 27, "cancel_stop_orders": True, "cancel_limit_orders": True})
+        h = hdr("DELETE", p, "", b)
+        requests.delete(B + p, headers=h, data=b, timeout=5)
 
-    h2 = hdr("GET", "/v2/positions")
-    pos = requests.get(B + "/v2/positions", headers=h2).json()
-    for x in pos.get('result', []):
-        if float(x['size']) != 0:
-            order({"product_id": x['product_id'], "size": abs(float(x['size'])), "side": "buy" if float(x['size']) < 0 else "sell", "order_type": "market_order"})
-    await u.message.reply_text("CLOSED ALL")
+        h2 = hdr("GET", "/v2/positions")
+        pos = requests.get(B + "/v2/positions", headers=h2, timeout=5).json()
+        for x in pos.get('result', []):
+            if float(x['size']) != 0:
+                order({"product_id": x['product_id'], "size": abs(float(x['size'])), "side": "buy" if float(x['size']) < 0 else "sell", "order_type": "market_order"})
+        await u.message.reply_text("CLOSED ALL")
+    except Exception as ex:
+        await u.message.reply_text(f"Close error: {ex}")
 
-# --- BOT SETUP ---
+# --- BOT SETUP - CONFLICT FIX ---
 app = Application.builder().token(T).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("trend", trend))
@@ -169,4 +185,6 @@ app.add_handler(CommandHandler("short", short_cmd))
 app.add_handler(CommandHandler("long", long_cmd))
 app.add_handler(CommandHandler("close", close_cmd))
 app.add_handler(CallbackQueryHandler(button))
-app.run_polling()
+
+# IMPORTANT FIX FOR CONFLICT ERROR
+app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
