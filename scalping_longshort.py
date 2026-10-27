@@ -3,187 +3,170 @@ import time
 import hmac
 import hashlib
 import requests
-import asyncio
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import json
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- CONFIG ---
-DELTA_API_KEY = os.getenv("DELTA_API_KEY")
-DELTA_API_SECRET = os.getenv("DELTA_API_SECRET")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-BASE_URL = "https://api.india.delta.exchange"
+K = os.getenv("DELTA_API_KEY")
+S = os.getenv("DELTA_API_SECRET")
+T = os.getenv("TELEGRAM_TOKEN")
+B = "https://api.india.delta.exchange"
 
-# Professional Risk Management
-SL_PERCENT = 1.2  # Stop Loss 1.2%
-TP_PERCENT = 2.0  # Take Profit 2.0%
-TRAILING_TRIGGER = 0.8 # 0.8% profit la trailing start
-TRAILING_GAP = 0.5 # 0.5% gap la trail
+SL = 1.2
+TP = 2.0
+USER_QTY = {}
+USER_LEV = {}
 
-def get_signature(method, timestamp, path, query, body, secret):
-    msg = method + timestamp + path + query + body
-    return hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+# --- DELTA HELPERS ---
+def sig(m, t, p, q, b, s):
+    return hmac.new(s.encode(), (m + t + p + q + b).encode(), hashlib.sha256).hexdigest()
 
-def get_headers(method, path, query="", body=""):
-    timestamp = str(int(time.time()))
-    signature = get_signature(method, timestamp, path, query, body, DELTA_API_SECRET)
-    return {
-        "api-key": DELTA_API_KEY,
-        "timestamp": timestamp,
-        "signature": signature,
-        "Content-Type": "application/json"
-    }
+def hdr(m, p, q="", b=""):
+    t = str(int(time.time()))
+    return {"api-key": K, "timestamp": t, "signature": sig(m, t, p, q, b, S), "Content-Type": "application/json"}
 
-def get_mark_price(symbol="BTCUSD"):
-    r = requests.get(f"{BASE_URL}/v2/tickers/{symbol}")
-    return float(r.json()['result']['mark_price'])
+def price(s="BTCUSD"):
+    return float(requests.get(f"{B}/v2/tickers/{s}").json()['result']['mark_price'])
 
-def place_order(payload):
-    path = "/v2/orders"
-    body = str(payload).replace("'", '"') # simple json
-    import json
-    body_str = json.dumps(payload)
-    headers = get_headers("POST", path, "", body_str)
-    res = requests.post(BASE_URL + path, headers=headers, data=body_str)
-    print(f"ORDER RES: {res.text}")
-    return res.json()
+def order(d):
+    p = "/v2/orders"
+    b = json.dumps(d)
+    h = hdr("POST", p, "", b)
+    r = requests.post(B + p, headers=h, data=b)
+    print(r.text)
+    return r.json()
 
-async def short_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = "BTCUSD"
-    size = 0.01  # Professional size $800 notional - 0.001 na fees la pogum
-    if context.args:
-        # /short BTCUSD 0.01 maari kuduthalum edukkum
-        try: size = float(context.args[0].split()[-1])
-        except: pass
-    
-    entry_price = get_mark_price(symbol)
-    
-    # 1. ENTRY - SHORT MARKET
-    entry_payload = {
-        "product_id": 27, # BTCUSD
-        "product_symbol": symbol,
-        "size": size,
-        "side": "sell",
-        "order_type": "market_order",
-        "time_in_force": "ioc"
-    }
-    entry_res = place_order(entry_payload)
-    
-    # 2. STOP LOSS
-    sl_price = round(entry_price * (1 + SL_PERCENT/100), 1)
-    sl_payload = {
-        "product_id": 27,
-        "size": size,
-        "side": "buy",
-        "order_type": "market_order",
-        "stop_order_type": "stop_loss_order",
-        "stop_price": str(sl_price),
-        "stop_trigger_method": "mark_price",
-        "reduce_only": True,
-        "bracket_stop_trigger_method": "mark_price"
-    }
-    place_order(sl_payload)
-    
-    # 3. TAKE PROFIT
-    tp_price = round(entry_price * (1 - TP_PERCENT/100), 1)
-    tp_payload = {
-        "product_id": 27,
-        "size": size,
-        "side": "buy",
-        "order_type": "limit_order",
-        "limit_price": str(tp_price),
-        "reduce_only": True,
-        "time_in_force": "gtc"
-    }
-    place_order(tp_payload)
-    
-    # 4. START TRAILING MONITOR IN BACKGROUND
-    context.application.create_task(trailing_monitor(update.effective_chat.id, symbol, "short", entry_price, size, sl_price))
+def get_candles(resolution="5"):
+    try:
+        r = requests.get(f"{B}/v2/chart/history?symbol=BTCUSD&resolution={resolution}&from=0&to=9999999999").json()
+        c = r['result']
+        last = c[-1]
+        return last['close'] > last['open']
+    except:
+        return False
 
-    await update.message.reply_text(
-        f"🔴 REAL SHORT OPENED!\n\n"
-        f"Symbol: {symbol}\n"
-        f"Size: {size} BTC\n"
-        f"Entry: {entry_price}\n"
-        f"SL: {sl_price} ({SL_PERCENT}%)\n"
-        f"TP: {tp_price} ({TP_PERCENT}%)\n"
-        f"Trailing: Active from +{TRAILING_TRIGGER}%\n\n"
-        f"✅ 3 Orders Placed in Delta!\nCheck Positions & Stop Orders tab Anna!"
+def set_lev(lev=20):
+    p = "/v2/products/27"
+    b = json.dumps({"leverage": str(lev)})
+    h = hdr("PUT", p, "", b)
+    requests.put(B + p, headers=h, data=b)
+
+# --- COMMANDS ---
+async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "DELTA PRO BOT\n\n"
+        "/start - Menu\n"
+        "/trend - Market Trend Report\n"
+        "/qty 0.01 - Set Quantity\n"
+        "/lev 20 - Set Leverage\n"
+        "/long - Long with Permission\n"
+        "/short - Short with Permission\n"
+        "/close - Close All"
     )
+    await u.message.reply_text(txt)
 
-async def trailing_monitor(chat_id, symbol, side, entry_price, size, current_sl):
-    """Professional Trailing - Profit vandha SL ah move pannum"""
-    await asyncio.sleep(5)
-    trailing_active = False
-    best_price = entry_price
-    
-    for _ in range(360): # 1 hour monitor (6 sec * 360)
-        try:
-            mark = get_mark_price(symbol)
-            
-            if side == "short":
-                # Price keezha ponum - profit
-                if mark < best_price: best_price = mark
-                profit_pct = (entry_price - mark) / entry_price * 100
-                
-                new_sl = None
-                if profit_pct >= TRAILING_TRIGGER and not trailing_active:
-                    # Break-even ku move
-                    new_sl = entry_price * (1 + 0.1/100) # BE + 0.1%
-                    trailing_active = True
-                elif trailing_active and profit_pct > 1.0:
-                    # Trail by 0.5%
-                    new_sl = best_price * (1 + TRAILING_GAP/100)
-                
-                if new_sl and new_sl < current_sl:
-                    # Cancel old SL and place new SL
-                    # (Simplified - cancel all stop orders and place new one)
-                    # ... cancel logic ...
-                    sl_payload = {
-                        "product_id": 27, "size": size, "side": "buy",
-                        "order_type": "market_order", "stop_order_type": "stop_loss_order",
-                        "stop_price": str(round(new_sl,1)), "reduce_only": True
-                    }
-                    place_order(sl_payload)
-                    current_sl = new_sl
-                    print(f"TRAILING UPDATED: {new_sl}")
+async def trend(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    e = price()
+    is_5m = get_candles("5")
+    is_15m = get_candles("15")
+    is_1h = get_candles("60")
+    greens = sum([is_5m, is_15m, is_1h])
 
-            await asyncio.sleep(6)
-        except Exception as e:
-            print(f"Trailing error {e}")
-            await asyncio.sleep(10)
+    if greens >= 2:
+        trend_text = "BULLISH"
+        safety = "90% SAFE" if greens == 3 else "70% SAFE"
+        last5m = "GREEN" if is_5m else "RED"
+        decision = "LONG is good - /long"
+    else:
+        trend_text = "BEARISH"
+        safety = "90% SAFE" if greens == 0 else "70% SAFE"
+        last5m = "GREEN" if is_5m else "RED"
+        decision = "SHORT is good - /short"
 
-# --- SAME FOR LONG ---
-async def long_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Same logic but side = buy, SL = entry - 1.2%, TP = entry + 2%
-    symbol = "BTCUSD"
-    size = 0.01
-    entry_price = get_mark_price(symbol)
-    entry_payload = {"product_id": 27, "product_symbol": symbol, "size": size, "side": "buy", "order_type": "market_order"}
-    place_order(entry_payload)
-    
-    sl_price = round(entry_price * (1 - SL_PERCENT/100), 1)
-    tp_price = round(entry_price * (1 + TP_PERCENT/100), 1)
-    
-    place_order({"product_id": 27, "size": size, "side": "sell", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl_price), "reduce_only": True})
-    place_order({"product_id": 27, "size": size, "side": "sell", "order_type": "limit_order", "limit_price": str(tp_price), "reduce_only": True})
-    
-    await update.message.reply_text(f"🟢 REAL LONG OPENED!\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}\nTrailing Active!")
+    txt = (
+        f"BTCUSD TREND REPORT\n\n"
+        f"Price: {e}\n"
+        f"Last 5m: {last5m}\n\n"
+        f"Trend (5m+15m+1h): {trend_text}\n"
+        f"Safety: {safety}\n\n"
+        f"DECISION:\n{decision}"
+    )
+    await u.message.reply_text(txt)
 
-async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Close all with reduce_only
-    path = "/v2/positions"
-    headers = get_headers("GET", path)
-    pos = requests.get(BASE_URL+path, headers=headers).json()
-    for p in pos['result']:
-        if float(p['size']) != 0:
-            size = abs(float(p['size']))
-            side = "buy" if float(p['size']) < 0 else "sell"
-            place_order({"product_id": p['product_id'], "size": size, "side": side, "order_type": "market_order", "reduce_only": True})
-    await update.message.reply_text("✅ CLOSING ALL - Check Delta Fills tab for PNL!")
+async def qty_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    q = float(c.args[0]) if c.args else 0.01
+    USER_QTY[u.effective_user.id] = q
+    await u.message.reply_text(f"Qty Set: {q} BTC")
 
-# Bot setup
-app = Application.builder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler("short", short_command))
-app.add_handler(CommandHandler("long", long_command))
-app.add_handler(CommandHandler("close", close_command))
+async def lev_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    l = int(c.args[0]) if c.args else 20
+    USER_LEV[u.effective_user.id] = l
+    set_lev(l)
+    await u.message.reply_text(f"Leverage Set: {l}x")
+
+async def ask_perm(u: Update, side):
+    q = USER_QTY.get(u.effective_user.id, 0.01)
+    l = USER_LEV.get(u.effective_user.id, 20)
+    e = price()
+    kb = [[InlineKeyboardButton("YES TRADE", callback_data=f"{side}_yes"), InlineKeyboardButton("NO", callback_data="no")]]
+    txt = f"{side.upper()} Permission?\n\nPrice: {e}\nQty: {q}\nLev: {l}x\nSL: {SL}% TP: {TP}%\n\nConfirm?"
+    await u.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+
+async def short_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await ask_perm(u, "short")
+
+async def long_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await ask_perm(u, "long")
+
+async def button(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    q = u.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    qty = USER_QTY.get(uid, 0.01)
+    e = price()
+
+    if q.data == "no":
+        await q.edit_message_text("Cancelled")
+        return
+
+    if q.data == "short_yes":
+        sl = round(e * (1 + SL / 100), 1)
+        tp = round(e * (1 - TP / 100), 1)
+        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order"})
+        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
+        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
+        await q.edit_message_text(f"SHORT DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+
+    if q.data == "long_yes":
+        sl = round(e * (1 - SL / 100), 1)
+        tp = round(e * (1 + TP / 100), 1)
+        order({"product_id": 27, "size": qty, "side": "buy", "order_type": "market_order"})
+        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "market_order", "stop_order_type": "stop_loss_order", "stop_price": str(sl), "reduce_only": True})
+        order({"product_id": 27, "size": qty, "side": "sell", "order_type": "limit_order", "limit_price": str(tp), "reduce_only": True})
+        await q.edit_message_text(f"LONG DONE\nEntry {e}\nSL {sl}\nTP {tp}\nQty {qty}")
+
+async def close_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    p = "/v2/orders/all"
+    b = json.dumps({"product_id": 27, "cancel_stop_orders": True, "cancel_limit_orders": True})
+    h = hdr("DELETE", p, "", b)
+    requests.delete(B + p, headers=h, data=b)
+
+    h2 = hdr("GET", "/v2/positions")
+    pos = requests.get(B + "/v2/positions", headers=h2).json()
+    for x in pos.get('result', []):
+        if float(x['size']) != 0:
+            order({"product_id": x['product_id'], "size": abs(float(x['size'])), "side": "buy" if float(x['size']) < 0 else "sell", "order_type": "market_order"})
+    await u.message.reply_text("CLOSED ALL")
+
+# --- BOT SETUP ---
+app = Application.builder().token(T).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("trend", trend))
+app.add_handler(CommandHandler("qty", qty_cmd))
+app.add_handler(CommandHandler("lev", lev_cmd))
+app.add_handler(CommandHandler("short", short_cmd))
+app.add_handler(CommandHandler("long", long_cmd))
+app.add_handler(CommandHandler("close", close_cmd))
+app.add_handler(CallbackQueryHandler(button))
 app.run_polling()
