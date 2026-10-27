@@ -9,7 +9,6 @@ B = "https://api.india.delta.exchange"
 SL = 1.2
 TP = 2.0
 
-# MEMORY
 USER_QTY = {}
 USER_LEV = {}
 BEST_PRICE = {}
@@ -57,7 +56,6 @@ def get_real_position():
         return 0,0,0
     except: return 0,0,0
 
-# ===== JOB: NO FALSE CLOSE =====
 async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         cur_p = price()
@@ -65,7 +63,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
         all_uids = set(list(USER_QTY.keys()) + list(LAST_POS_SIZE.keys()) + list(ENTRY_TIME.keys()))
         for uid in list(all_uids):
             ent_time = ENTRY_TIME.get(uid, 0)
-            if ent_time !=0 and (time.time() - ent_time) < 75: # 75 sec grace, no false detection
+            if ent_time !=0 and (time.time() - ent_time) < 75:
                 if cur_size !=0: LAST_POS_SIZE[uid]=cur_size
                 continue
             last_size = LAST_POS_SIZE.get(uid, 0)
@@ -78,7 +76,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                 if uid not in ENTRY_PRICE or ENTRY_PRICE[uid]==0: ENTRY_PRICE[uid]=cur_p; BEST_PRICE[uid]=cur_p
                 size_abs = abs(cur_size)
                 if size_abs < 1: size_abs = 1
-                if cur_size < 0: # SHORT
+                if cur_size < 0:
                     if BEST_PRICE.get(uid, cur_p) > cur_p:
                         BEST_PRICE[uid]=cur_p
                         new_sl=round(BEST_PRICE[uid]*(1+SL/100),1); new_tp=round(BEST_PRICE[uid]*(1-TP/100),1)
@@ -87,7 +85,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                             order({"product_id":27,"size":int(size_abs) if size_abs>=1 else 1,"side":"buy","order_type":"market_order","stop_order_type":"stop_loss_order","stop_price":str(new_sl),"reduce_only":True})
                             order({"product_id":27,"size":int(size_abs) if size_abs>=1 else 1,"side":"buy","order_type":"limit_order","limit_price":str(new_tp),"reduce_only":True})
                             LAST_SL[uid]=new_sl; LAST_TP[uid]=new_tp
-                else: # LONG
+                else:
                     if BEST_PRICE.get(uid, cur_p) < cur_p:
                         BEST_PRICE[uid]=cur_p
                         new_sl=round(BEST_PRICE[uid]*(1-SL/100),1); new_tp=round(BEST_PRICE[uid]*(1+TP/100),1)
@@ -103,7 +101,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
 async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
-    txt=f"🤖 SCALPING BOT - FULL DETAILS 🤖\n\n💰 Balance: ${bal:.2f}\n📊 BTC: {cur:.1f}\n\n📦 SETTINGS:\n- QTY: {qty} Lot = {qty*0.001} BTC\n- Lev: {lev}x\n- SL: {SL}% TP: {TP}%\n\n📈 POSITION:\n- Size: {sz} ({'LONG' if sz>0 else 'SHORT' if sz<0 else 'No Pos'})\n- Entry: {entry}\n- UPNL: ${upnl:.2f}\n- Best: {BEST_PRICE.get(uid,'N/A')}\n- SL: {LAST_SL.get(uid,'N/A')} TP: {LAST_TP.get(uid,'N/A')}\n\n/cmds: /qty 1 /lev 20 /trend /long /short /close"
+    txt=f"🤖 SCALPING BOT - FULL DETAILS 🤖\n\n💰 Balance: ${bal:.2f}\n📊 BTC: {cur:.1f}\n\n📦 SETTINGS:\n- QTY: {qty} Lot = {qty*0.001} BTC\n- Lev: {lev}x\n- SL: {SL}% TP: {TP}%\n\n📈 POSITION:\n- Size: {sz}\n- Entry: {entry}\n- UPNL: ${upnl:.2f}\n- Best: {BEST_PRICE.get(uid,'N/A')}\n- SL: {LAST_SL.get(uid,'N/A')} TP: {LAST_TP.get(uid,'N/A')}\n\n/cmds: /qty 1 /lev 20 /trend /long /short /close"
     await u.message.reply_text(txt)
 
 def get_candles_detail(res="5"):
@@ -163,32 +161,58 @@ async def button(u,c):
             await q.edit_message_text(f"LONG DONE ✅ Entry {e} SL {sl} TP {tp}")
         else: await q.edit_message_text(f"FAILED: {res}")
 
+# ===== ONLY CLOSE UPDATED =====
 async def close_cmd(u,c):
-    await u.message.reply_text("⏳ Closing Anna... 100% close!")
+    await u.message.reply_text("⏳ Closing Anna...")
     try:
-        cancel_all_orders(); await asyncio.sleep(1)
-        sz,_,_=get_real_position()
-        print(f"CLOSE SIZE {sz}")
-        if sz !=0:
-            try:
-                p="/v2/positions/close_all"; b=json.dumps({"product_id":27, "close_all_portfolios": True})
-                h=hdr("POST",p,"",b); r=requests.post(B+p, headers=h, data=b, timeout=10)
-                print(f"CLOSE_ALL {r.text}")
-            except Exception as e: print(f"CLOSE_ALL err {e}")
-            await asyncio.sleep(1.5)
-            sz2,_,_=get_real_position()
-            if sz2 !=0:
-                side="sell" if sz2>0 else "buy"; close_sz=abs(sz2)
-                if close_sz<1: close_sz=1
-                order({"product_id":27,"size":int(close_sz),"side":side,"order_type":"market_order","reduce_only":"true"})
-                await asyncio.sleep(1)
-                order({"product_id":27,"size":int(close_sz),"side":side,"order_type":"market_order"})
+        h=hdr("GET","/v2/positions")
+        pos_raw=requests.get(B+"/v2/positions", headers=h, timeout=10).json()
+        sz=0
+        for x in pos_raw.get('result',[]):
+            if int(x.get('product_id',0))==27:
+                sz=float(x.get('size',0))
+                break
+        if sz==0:
+            await u.message.reply_text("✅ Already Positions (0) Anna!")
+            BEST_PRICE.pop(u.effective_user.id, None)
+            ENTRY_PRICE.pop(u.effective_user.id, None)
+            LAST_POS_SIZE[u.effective_user.id]=0
+            LAST_SL.pop(u.effective_user.id, None)
+            LAST_TP.pop(u.effective_user.id, None)
+            ENTRY_TIME.pop(u.effective_user.id, None)
+            return
+        side="buy" if sz<0 else "sell"
+        close_size=1
+        await u.message.reply_text(f"🔍 Found {sz} Trying {side} {close_size} lot...")
+        p="/v2/orders"
+        b1=json.dumps({"product_id":27,"size":close_size,"side":side,"order_type":"market_order"})
+        h1=hdr("POST",p,"",b1)
+        r1=requests.post(B+p, headers=h1, data=b1, timeout=10)
+        print(f"CLOSE TRY1 {r1.text}")
+        await asyncio.sleep(2)
+        sz2,_,_=get_real_position()
+        if sz2==0:
+            await u.message.reply_text("✅ CLOSED Anna! Positions (0)")
+        else:
+            b2=json.dumps({"product_id":27,"size":close_size,"side":side,"order_type":"market_order","reduce_only":True})
+            h2=hdr("POST",p,"",b2)
+            r2=requests.post(B+p, headers=h2, data=b2, timeout=10)
+            print(f"CLOSE TRY2 {r2.text}")
+            await asyncio.sleep(2)
+            sz3,_,_=get_real_position()
+            if sz3==0:
+                await u.message.reply_text("✅ CLOSED Anna! (try2)")
+            else:
+                await u.message.reply_text(f"❌ Fail Res: {r1.text[:300]}")
         cancel_all_orders()
-        sz_final,_,_=get_real_position()
-        if sz_final==0: await u.message.reply_text("✅ ALL CLOSED Anna! Positions (0) ✅")
-        else: await u.message.reply_text("⚠️ Check pannunga, Delta la X click pannunga!")
-        BEST_PRICE.pop(u.effective_user.id, None); ENTRY_PRICE.pop(u.effective_user.id, None); LAST_POS_SIZE[u.effective_user.id]=0; LAST_SL.pop(u.effective_user.id, None); LAST_TP.pop(u.effective_user.id, None); ENTRY_TIME.pop(u.effective_user.id, None)
-    except Exception as e: await u.message.reply_text(f"❌ {e}")
+        BEST_PRICE.pop(u.effective_user.id, None)
+        ENTRY_PRICE.pop(u.effective_user.id, None)
+        LAST_POS_SIZE[u.effective_user.id]=0
+        LAST_SL.pop(u.effective_user.id, None)
+        LAST_TP.pop(u.effective_user.id, None)
+        ENTRY_TIME.pop(u.effective_user.id, None)
+    except Exception as e:
+        await u.message.reply_text(f"❌ {e}")
 
 def main():
     app=Application.builder().token(T).build()
