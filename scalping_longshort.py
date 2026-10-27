@@ -41,7 +41,6 @@ def order(d):
     p="/v2/orders"; b=json.dumps(d, separators=(',', ':')); h=hdr("POST",p,"",b)
     r=requests.post(B+p, headers=h, data=b, timeout=10); print(f"ORDER {b} => {r.text}"); return r.json()
 
-# --- V106 LOGIC APPLIED HERE ---
 def cancel_all_orders():
     try:
         p="/v2/orders/all"; b=json.dumps({"product_id":27,"cancel_stop_orders":True,"cancel_limit_orders":True}, separators=(',', ':'))
@@ -96,14 +95,12 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                 if cur_size<0 and cur_p>=float(sl_price): force=True
                 elif cur_size>0 and cur_p<=float(sl_price): force=True
                 if force:
-                    # V106 FIX - Munaadi close, aprom cancel
                     side="buy" if cur_size<0 else "sell"
                     lots=int(abs(cur_size)*1000) if abs(cur_size)<10 else int(abs(cur_size))
                     if lots<1: lots=1
                     order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
                     await asyncio.sleep(2)
                     cancel_all_orders()
-                    await asyncio.sleep(1)
                     sz_check,_,_=get_real_position()
                     if abs(sz_check)<0.0000001:
                         try: await context.bot.send_message(uid, f"✅ SL HIT CLOSED! {cur_p}")
@@ -122,7 +119,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
 async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
-    txt=f"🤖 BOT LIVE\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT LIVE V106 FINAL FIX\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 def get_candles_detail(res="5"):
@@ -196,52 +193,85 @@ async def button(u,c):
             await q.edit_message_text(f"LONG DONE ✅ Entry {e} SL {sl} TP {tp}")
         else: await q.edit_message_text(f"FAILED: {res}")
 
-# --- V106 CLOSE LOGIC APPLIED - DOUBLE QTY BUG FIXED ---
+# --- V106 ULTIMATE FIX - FOR YOUR SCREENSHOT BUG ---
 async def close_cmd(u,c):
-    uid=u.effective_user.id; IS_CLOSING[uid]=True
-    await u.message.reply_text("⏳ V106 Closing - Position First, SL Later...")
+    uid=u.effective_user.id
+    IS_CLOSING[uid]=True
+    await u.message.reply_text("🔍 V106 Checking REAL Delta Position (Not Bot Cache)...")
     try:
-        sz,entry,upnl=get_real_position()
+        # STEP 0: Get REAL position from Delta - ignore bot cache
+        sz=0
+        try:
+            h=hdr("GET","/v2/positions")
+            pos=requests.get(B+"/v2/positions", headers=h, timeout=10).json()
+            print(f"POSITIONS API: {pos}")
+            for x in pos.get('result',[]):
+                if int(x.get('product_id',0))==27:
+                    s=float(x.get('size',0))
+                    if abs(s)>0.0000001:
+                        sz=s
+                        break
+        except Exception as ex:
+            print(f"pos error {ex}")
+
         if abs(sz)<0.0000001:
-            await u.message.reply_text("✅ Already Positions (0)")
-            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); IS_CLOSING[uid]=False
+            try:
+                h2=hdr("GET","/v2/positions/margined","product_id=27","")
+                pos2=requests.get(B+"/v2/positions/margined?product_id=27", headers=h2, timeout=10).json()
+                print(f"MARGINED POS: {pos2}")
+                res2=pos2.get('result')
+                items=[res2] if isinstance(res2, dict) else (res2 if isinstance(res2, list) else [])
+                for x in items:
+                    if int(x.get('product_id',0))==27:
+                        s=float(x.get('size',0))
+                        if abs(s)>0.0000001:
+                            sz=s
+                            break
+            except Exception as ex:
+                print(f"margined error {ex}")
+
+        await u.message.reply_text(f"📊 REAL Delta: {sz} BTC")
+
+        if abs(sz)<0.0000001:
+            await u.message.reply_text("✅ Already Positions (0) - Delta la kooda illa")
+            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None)
+            IS_CLOSING[uid]=False
             cancel_all_orders()
             return
-        
+
         lots=int(abs(sz)*1000) if abs(sz)<10 else int(abs(sz))
         if lots<1: lots=1
         side="buy" if sz<0 else "sell"
-        
-        await u.message.reply_text(f"Found {sz} BTC = {lots} lots, V106 Logic: Closing with {side} FIRST...")
-        
+        await u.message.reply_text(f"Found {sz} BTC = {lots} lots, V106 Closing {side} FIRST...")
+
         # STEP 1: MUNAADI POSITION CLOSE - V106 FIX
         res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
         await asyncio.sleep(3)
-        
-        # STEP 2: APROM SL CANCEL - V106 FIX
+
+        # STEP 2: APROM SL CANCEL
         cancel_all_orders()
-        
+        await asyncio.sleep(1)
+
         sz_check,_,_=get_real_position()
         if abs(sz_check)<0.0000001:
-            await u.message.reply_text(f"✅ CLOSED! Positions (0) ✅\nClosed {sz} BTC at {price():.1f}\nDouble QTY Bug Fixed by V106 Logic!")
-            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); IS_CLOSING[uid]=False
+            await u.message.reply_text(f"✅ CLOSED! Positions (0) ✅\nClosed {sz} BTC at {price():.1f}\nScreenshot Bug Fixed!")
+            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None)
+            IS_CLOSING[uid]=False
             return
         else:
-            await u.message.reply_text(f"❌ Still {sz_check} open! Retrying...")
-            # Retry with V106 logic again
+            await u.message.reply_text(f"⚠️ Still {sz_check} open! Retry...")
             lots2=int(abs(sz_check)*1000) if abs(sz_check)<10 else int(abs(sz_check))
             side2="buy" if sz_check<0 else "sell"
             order({"product_id":27,"size":lots2,"side":side2,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
             await asyncio.sleep(2)
             cancel_all_orders()
             sz_final,_,_=get_real_position()
-            if abs(sz_final)<0.0000001:
-                await u.message.reply_text(f"✅ CLOSED on 2nd try!")
-            else:
-                await u.message.reply_text(f"❌ Still {sz_final} open!\nResp: {res}\nWebsite X button click pannunga!")
-            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); IS_CLOSING[uid]=False
-    except Exception as e: 
-        await u.message.reply_text(f"❌ {e}")
+            await u.message.reply_text(f"Final Check: {sz_final} BTC\nResp: {res}")
+            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None)
+            IS_CLOSING[uid]=False
+
+    except Exception as e:
+        await u.message.reply_text(f"❌ Error {e}")
         IS_CLOSING[u.effective_user.id]=False
         cancel_all_orders()
 
@@ -251,6 +281,6 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=30, first=15)
-    print("BOT LIVE FINAL FIX V106 CLOSE LOGIC"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V106 FINAL FIX FOR SCREENSHOT"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
