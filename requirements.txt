@@ -1,4 +1,2 @@
-python-telegram-bot==20.7
-ccxt==4.2.25
-pandas==2.0.3
-httpx==0.24.1
+python-telegram-bot==21.11
+ccxt
