@@ -10,6 +10,8 @@ BC="https://cdn.india.deltaex.org"
 SL=1.2
 TP=2.0
 TRAIL_TP=0.6
+BE_PROFIT_DOLLAR=25 # BE SHIFT TRIGGER
+PARTIAL_BOOK_PCT=70 # 70% BOOK
 USER_QTY={}
 USER_LEV={}
 ALERT_USERS=set()
@@ -22,6 +24,8 @@ ENTRY_TIME={}
 IS_CLOSING={}
 LAST_ORDER_ID={}
 TRAILING_ACTIVE={}
+BE_DONE={}
+PARTIAL_DONE={}
 LAST_ALERT_TIME=0
 LAST_ALERT_SIGNAL=""
 CONFIRM_PENDING={}
@@ -31,7 +35,7 @@ class HealthHandler(BaseHTTPRequestHandler):
   self.send_response(200)
   self.send_header('Content-type','text/plain')
   self.end_headers()
-  self.wfile.write(b'BOT OK V120 ALL 7 FEATURES')
+  self.wfile.write(b'BOT OK V121 NO LOSS BE+CVD+70%BOOK')
  def do_HEAD(self):
   self.send_response(200)
   self.send_header('Content-type','text/plain')
@@ -167,6 +171,7 @@ def fetch_candles_full(res="5m", count=100):
  highs=[]
  lows=[]
  vols=[]
+ opens=[]
  cur_live=price()
  try:
   now=int(time.time())
@@ -180,6 +185,7 @@ def fetch_candles_full(res="5m", count=100):
     highs=[float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
     lows=[float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
     vols=[float(c.get('volume',0)) for c in candles]
+    opens=[float(c.get('open',0)) for c in candles if float(c.get('open',0))>0]
   except:
    pass
   if len(closes)<20:
@@ -195,15 +201,16 @@ def fetch_candles_full(res="5m", count=100):
      highs=[float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
      lows=[float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
      vols=[float(c.get('volume',0)) for c in candles]
+     opens=[float(c.get('open',0)) for c in candles if float(c.get('open',0))>0]
    except:
     pass
   if closes and abs(closes[-1]-cur_live)/cur_live>0.008:
    closes[-1]=cur_live
    highs[-1]=max(highs[-1],cur_live)
    lows[-1]=min(lows[-1],cur_live)
-  return closes[-count:], highs[-count:], lows[-count:], vols[-count:]
+  return closes[-count:], highs[-count:], lows[-count:], vols[-count:], opens[-count:]
  except:
-  return [],[],[],[]
+  return [],[],[],[],[]
 def calc_ema(prices, period):
  if len(prices)<period:
   return prices[-1] if prices else 0
@@ -253,6 +260,32 @@ def calc_vol_pct(vols):
   return int(cur/avg*100) if avg!=0 else 100
  except:
   return 100
+# === NEW V121: CVD + LIQUIDITY CHECK ===
+def calc_cvd_and_liquidity():
+ try:
+  closes,highs,lows,vols,opens=fetch_candles_full("5m",30)
+  if len(closes)<10:
+   return "NEUTRAL", "NO SWEEP", 0
+  # CVD: last 5 candle delta sum
+  deltas=[]
+  for i in range(-5,0):
+   body=closes[i]-opens[i]
+   deltas.append(body*vols[i] if i < len(vols) else 0)
+  cvd_sum=sum(deltas)
+  # Wick check for liquidity sweep
+  last_body=abs(closes[-1]-opens[-1])
+  last_wick_up=highs[-1]-max(closes[-1],opens[-1])
+  last_wick_down=min(closes[-1],opens[-1])-lows[-1]
+  sweep="NO SWEEP"
+  if last_wick_up > last_body*2.5:
+   sweep="BEAR SWEEP 🔴 (Fake pump)"
+  elif last_wick_down > last_body*2.5:
+   sweep="BULL SWEEP 🟢 (Fake dump)"
+  cvd_status="BULLISH" if cvd_sum>0 else "BEARISH" if cvd_sum<0 else "NEUTRAL"
+  return cvd_status, sweep, cvd_sum
+ except:
+  return "NEUTRAL","NO SWEEP",0
+
 def calc_supertrend(closes,highs,lows,period=10,mult=3):
  try:
   if len(closes)<period:
@@ -271,7 +304,7 @@ def calc_supertrend(closes,highs,lows,period=10,mult=3):
  except:
   return "SIDE",0
 def get_pro_signal(res_label):
- closes,highs,lows,vols=fetch_candles_full(res_label,100)
+ closes,highs,lows,vols,opens=fetch_candles_full(res_label,100)
  if len(closes)<25:
   return {"ema9":0,"ema21":0,"ema_sig":"SIDEWAYS","rsi":50,"st":"SIDE","st_val":0,"price":price(),"atr":100,"vwap":price(),"vol_pct":100}
  ema9=calc_ema(closes,9)
@@ -320,6 +353,7 @@ def calc_score(s5,s15,s60):
   return 50,50
  long_pct=int(long_score/total*100)
  return long_pct, 100-long_pct
+
 async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
  global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
  try:
@@ -332,21 +366,40 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
   s15=get_pro_signal("15m")
   s60=get_pro_signal("1h")
   ticker=get_ticker_info()
+  cvd_status, sweep, cvd_sum = calc_cvd_and_liquidity()
   long_pct, short_pct=calc_score(s5,s15,s60)
   cur=price()
+  # === V121 FILTER: CVD + SWEEP ===
+  display_long=long_pct
+  display_short=short_pct
+  tag="🟢 BOOM"
+  if long_pct>=70 and cvd_status=="BEARISH":
+   display_long=60
+   tag="🟡 WEAK - CVD BEARISH ❌ SKIP"
+  elif short_pct>=70 and cvd_status=="BULLISH":
+   display_short=60
+   tag="🟡 WEAK - CVD BULLISH ❌ SKIP"
+  if "SWEEP" in sweep and "BEAR SWEEP" in sweep and long_pct>=70:
+   display_long=55
+   tag=f"🟡 WEAK - {sweep} SKIP"
+  if "SWEEP" in sweep and "BULL SWEEP" in sweep and short_pct>=70:
+   display_short=55
+   tag=f"🟡 WEAK - {sweep} SKIP"
+
   vwap_status="ABOVE ✅" if cur>s5['vwap'] else "BELOW ❌"
   vol_str=f"{s5['vol_pct']}% {'🔥' if s5['vol_pct']>120 else '✅' if s5['vol_pct']>80 else '⚠️'}"
   signal=""
   kb=None
-  if long_pct>=70:
-   signal=f"LONG_{long_pct}"
-   msg=f"🔥 CONFIRMATION NEEDED - LONG {long_pct}%\n\nBTC: ${cur:.1f} | EMA9>21 ✅\nRSI: {s5['rsi']} | Vol: {vol_str}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['ema_sig']} 15M {s15['ema_sig']} 1H {s60['ema_sig']}\n\nQTY: 1 Lot | Lev: 20x\nSL: ATR x1.5 = {cur - s5['atr']*1.5:.1f} | TP: +2%\n\nTake LONG? 👇"
-   kb=[[InlineKeyboardButton("✅ YES LONG", callback_data=f"confirm_long_{long_pct}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
-  elif short_pct>=70:
-   signal=f"SHORT_{short_pct}"
-   msg=f"🔻 CONFIRMATION NEEDED - SHORT {short_pct}%\n\nBTC: ${cur:.1f} | EMA9<21 ✅\nRSI: {s5['rsi']} | Vol: {vol_str}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['ema_sig']} 15M {s15['ema_sig']} 1H {s60['ema_sig']}\n\nQTY: 1 Lot | Lev: 20x\nSL: ATR x1.5 = {cur + s5['atr']*1.5:.1f} | TP: -2%\n\nTake SHORT? 👇"
-   kb=[[InlineKeyboardButton("✅ YES SHORT", callback_data=f"confirm_short_{short_pct}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
-  if signal and signal!=LAST_ALERT_SIGNAL:
+  # Only alert if BOOM
+  if display_long>=70:
+   signal=f"LONG_{display_long}"
+   msg=f"{tag} - LONG {display_long}%\n\nBTC: ${cur:.1f} | EMA9>21 ✅\nRSI: {s5['rsi']} | Vol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['ema_sig']} 15M {s15['ema_sig']} 1H {s60['ema_sig']}\n\nQTY: 1 Lot | Lev: 20x\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: +2%\n\nTake LONG? 👇"
+   kb=[[InlineKeyboardButton("✅ YES LONG", callback_data=f"confirm_long_{display_long}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
+  elif display_short>=70:
+   signal=f"SHORT_{display_short}"
+   msg=f"{tag} - SHORT {display_short}%\n\nBTC: ${cur:.1f} | EMA9<21 ✅\nRSI: {s5['rsi']} | Vol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['ema_sig']} 15M {s15['ema_sig']} 1H {s60['ema_sig']}\n\nQTY: 1 Lot | Lev: 20x\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: -2%\n\nTake SHORT? 👇"
+   kb=[[InlineKeyboardButton("✅ YES SHORT", callback_data=f"confirm_short_{display_short}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
+  if signal and signal!=LAST_ALERT_SIGNAL and "BOOM" in tag:
    all_users=ALERT_USERS.union(set(USER_QTY.keys()))
    for uid in list(all_users):
     try:
@@ -361,6 +414,7 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
    LAST_ALERT_SIGNAL=signal
  except Exception as e:
   print(f"auto_alert error {e}")
+
 async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
  try:
   if any(IS_CLOSING.values()):
@@ -393,6 +447,44 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
    is_trailing=TRAILING_ACTIVE.get(uid, False)
    last_best_alert=LAST_BEST_ALERT.get(uid, entry)
    should_alert_trail=False
+
+   # === V121 NEW: BE SHIFT LOGIC (NO TRAILING, ONLY ONE TIME) ===
+   be_done=BE_DONE.get(uid, False)
+   pnl_dollar_calc=(cur_p-entry)*abs(cur_size) if cur_size>0 else (entry-cur_p)*abs(cur_size)
+   if not be_done and pnl_dollar_calc >= BE_PROFIT_DOLLAR:
+    BE_DONE[uid]=True
+    try:
+     await context.bot.send_message(uid, f"🛡️ BE ACTIVATED! LOSS $0\n\nEntry: {entry:.1f} | Now: {cur_p:.1f}\nProfit: +${pnl_dollar_calc:.2f} >= ${BE_PROFIT_DOLLAR}\nSL -> {entry:.1f} (ENTRY) 🔒\n\nIppo enna nadanthalum LOSS illa! $0 Safe!")
+    except:
+     pass
+   # If BE done, SL = entry (NO LOSS)
+   sl_be_price=entry if be_done else None
+
+   # === V121 NEW: 70% PARTIAL BOOK ===
+   partial_done=PARTIAL_DONE.get(uid, False)
+   if not partial_done and cur_size>0 and cur_p >= entry*(1+TP*0.7/100):
+    partial_done=True
+    PARTIAL_DONE[uid]=True
+    lots_total=size_to_lots(cur_size)
+    lots_book=int(lots_total*0.7)
+    if lots_book>=1:
+     order({"product_id":27,"size":lots_book,"side":"sell","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
+     try:
+      await context.bot.send_message(uid, f"💰 70% BOOKED! Profit Locked!\n\nEntry {entry:.1f} -> {cur_p:.1f}\nBooked {lots_book} Lots ({PARTIAL_BOOK_PCT}%)\nProfit +${(cur_p-entry)*lots_book*0.001*cur_p*0.01:.2f}\nBalance Safe! Remaining 30% BE la irukku!")
+     except:
+      pass
+   elif not partial_done and cur_size<0 and cur_p <= entry*(1-TP*0.7/100):
+    PARTIAL_DONE[uid]=True
+    lots_total=size_to_lots(cur_size)
+    lots_book=int(lots_total*0.7)
+    if lots_book>=1:
+     order({"product_id":27,"size":lots_book,"side":"buy","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
+     try:
+      await context.bot.send_message(uid, f"💰 70% BOOKED! Profit Locked!\n\nEntry {entry:.1f} -> {cur_p:.1f}\nBooked {lots_book} Lots ({PARTIAL_BOOK_PCT}%)\nRemaining 30% BE la!")
+
+     except:
+      pass
+
    if cur_size>0:
     if cur_p>best:
      BEST_PRICE[uid]=cur_p
@@ -401,10 +493,12 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
       should_alert_trail=True
       LAST_BEST_ALERT[uid]=best
      sl_now=best-(atr_live*1.5)
+     if be_done:
+      sl_now=entry # BE la lock
      if should_alert_trail:
       try:
        pnl_dollar=(cur_p-entry)*abs(cur_size)
-       await context.bot.send_message(uid, f"🔒 LONG SL TRAIL\n\nBest: {best:.1f} (+{(best-entry):.1f}$)\nSL: -> {sl_now:.1f} 🔼 LOCK\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\n\nVWAP: {vwap_live:.1f} {'ABOVE ✅' if cur_p>vwap_live else 'BELOW'} | Vol: {vol_live}% {'🔥' if vol_live>120 else '✅'}\nATR SL: {sl_now:.1f} (Dynamic)\nOrderID: {order_id_saved}\n\nHold - Profit Locked!")
+       await context.bot.send_message(uid, f"🔒 LONG UPDATE\n\nBest: {best:.1f} (+{(best-entry):.1f}$)\nSL: {sl_now:.1f} {'🛡️ BE $0 LOSS' if be_done else '🔼 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\n\nVWAP: {vwap_live:.1f} | Vol: {vol_live}% | ATR {atr_live:.1f}\nOrderID: {order_id_saved}\n{'BE DONE ✅' if be_done else ''}")
       except:
        pass
    else:
@@ -415,19 +509,22 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
       should_alert_trail=True
       LAST_BEST_ALERT[uid]=best
      sl_now=best+(atr_live*1.5)
+     if be_done:
+      sl_now=entry
      if should_alert_trail:
       try:
        pnl_dollar=(entry-cur_p)*abs(cur_size)
-       await context.bot.send_message(uid, f"🔒 SHORT SL TRAIL\n\nBest: {best:.1f} (+{(entry-best):.1f}$)\nSL: -> {sl_now:.1f} 🔽 LOCK\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\nVWAP: {vwap_live:.1f} | Vol: {vol_live}%\nATR SL: {sl_now:.1f} (Dynamic)\nOrderID: {order_id_saved}")
+       await context.bot.send_message(uid, f"🔒 SHORT UPDATE\n\nBest: {best:.1f} (+{(entry-best):.1f}$)\nSL: {sl_now:.1f} {'🛡️ BE $0 LOSS' if be_done else '🔽 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\nVWAP: {vwap_live:.1f} | Vol: {vol_live}%\nATR SL: {sl_now:.1f}\nOrderID: {order_id_saved}")
       except:
        pass
+
    close_reason=None
    side_to_close=None
    if cur_size>0:
-    sl_price=best-(atr_live*1.5)
+    sl_price=entry if be_done else best-(atr_live*1.5)
     tp_price=entry*(1+TP/100)
     if cur_p<=sl_price:
-     close_reason=f"SL ATR Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f} OrderID {order_id_saved} UPNL ${upnl_real:.2f}"
+     close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f} OrderID {order_id_saved} UPNL ${upnl_real:.2f}"
      side_to_close="sell"
     elif cur_p>=tp_price:
      if not is_trailing:
@@ -441,10 +538,10 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
       close_reason=f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved} Profit ${upnl_real:.2f}"
       side_to_close="sell"
    else:
-    sl_price=best+(atr_live*1.5)
+    sl_price=entry if be_done else best+(atr_live*1.5)
     tp_price=entry*(1-TP/100)
     if cur_p>=sl_price:
-     close_reason=f"SL ATR Best {best:.1f} SL {sl_price:.1f} >= {cur_p:.1f} OrderID {order_id_saved}"
+     close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} >= {cur_p:.1f} OrderID {order_id_saved}"
      side_to_close="buy"
     elif cur_p<=tp_price:
      if not is_trailing:
@@ -471,7 +568,10 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
      if ENTRY_TIME.get(uid):
       duration=f"{int((time.time()-ENTRY_TIME.get(uid,0))/60)}m"
      try:
-      await context.bot.send_message(uid, f"✅ LONG CLOSED - PROFIT!\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: {profit_dollar:+.1f}$ ({profit_pct:+.2f}%) = ${profit_dollar:.2f}\nDuration: {duration} | Best: {best:.1f}\n\nReason: {close_reason.split('OrderID')[0]}\nVWAP Exit: {'Above ✅' if cur_p>vwap_live else 'Below'} | Vol: {vol_live}%\nBal: ${get_balance():.2f} | Next Signal Wait...\nOrderID: {order_id_saved}")
+      if be_done and profit_dollar>=0:
+       await context.bot.send_message(uid, f"✅ BE SAFE CLOSE! NO LOSS!\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: {profit_dollar:+.1f}$ ({profit_pct:+.2f}%)\nDuration: {duration} | Best: {best:.1f}\n\nReason: {close_reason.split('OrderID')[0]}\nBE Protected ✅ LOSS $0\nBal: ${get_balance():.2f}\nOrderID: {order_id_saved}")
+      else:
+       await context.bot.send_message(uid, f"✅ LONG CLOSED - PROFIT!\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: {profit_dollar:+.1f}$ ({profit_pct:+.2f}%) = ${profit_dollar:.2f}\nDuration: {duration} | Best: {best:.1f}\n\nReason: {close_reason.split('OrderID')[0]}\nVWAP Exit: {'Above ✅' if cur_p>vwap_live else 'Below'} | Vol: {vol_live}%\nBal: ${get_balance():.2f} | Next Signal Wait...\nOrderID: {order_id_saved}")
      except:
       pass
      BEST_PRICE.pop(uid,None)
@@ -483,6 +583,8 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
      LAST_ORDER_ID.pop(uid,None)
      TRAILING_ACTIVE.pop(uid,None)
      LAST_BEST_ALERT.pop(uid,None)
+     BE_DONE.pop(uid,None)
+     PARTIAL_DONE.pop(uid,None)
   for uid in all_uids:
    if cur_size!=0:
     LAST_POS_SIZE[uid]=cur_size
@@ -509,7 +611,7 @@ async def start(u,c):
  if not order_id:
   order_id="None"
  liq_safe=((cur-liq)/cur*100) if liq!=0 and sz>0 else ((liq-cur)/cur*100) if liq!=0 else 0
- txt=f"🤖 BOT V120 - 7 FEATURES LIVE ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nMargin: ${margin:.2f} | OrderID: {order_id}\nATR SL: Dynamic x1.5 | TP: {TP}% Trail: {TRAIL_TP}%\nVWAP+Vol+OI | Confirmation Mode ON ✅\nLive la Alert OFF, Close ayiducha Alert ON ✅\n/cmds: /qty /lev /trend /long /short /close"
+ txt=f"🤖 BOT V121 NO LOSS ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nMargin: ${margin:.2f} | OrderID: {order_id}\nATR SL: BE @ ${BE_PROFIT_DOLLAR} | TP: {TP}% Trail: {TRAIL_TP}%\nCVD+LIQ+70%BOOK LIVE ✅\n/cmds: /qty /lev /trend /long /short /close"
  await u.message.reply_text(txt)
 async def trend_cmd(u,c):
  ALERT_USERS.add(u.effective_user.id)
@@ -518,6 +620,7 @@ async def trend_cmd(u,c):
   bal=get_balance()
   sz,entry_real,upnl_real,liq_real,margin_real=get_real_position_full()
   ticker=get_ticker_info()
+  cvd_status, sweep, _ = calc_cvd_and_liquidity()
   uid=u.effective_user.id
   order_id=LAST_ORDER_ID.get(uid)
   if not order_id and abs(sz)>0.0000001:
@@ -534,15 +637,23 @@ async def trend_cmd(u,c):
     LAST_ORDER_ID[uid]=fetched
   if not order_id:
    order_id="None"
-  await u.message.reply_text("📊 Loading V120 PRO Indicators... 5m/15m/1h VWAP Vol OI ATR")
+  await u.message.reply_text("📊 Loading V121 NO LOSS... CVD+LIQ Check...")
   s5=get_pro_signal("5m")
   s15=get_pro_signal("15m")
   s60=get_pro_signal("1h")
   long_pct, short_pct=calc_score(s5,s15,s60)
+  # Apply CVD filter for display
+  final_tag="🟢 BOOM" if long_pct>=70 or short_pct>=70 else "⚖️ WAIT"
+  if long_pct>=70 and cvd_status=="BEARISH":
+   final_tag="🟡 WEAK - CVD BEARISH SKIP"
+   long_pct=60
+  if short_pct>=70 and cvd_status=="BULLISH":
+   final_tag="🟡 WEAK - CVD BULLISH SKIP"
+   short_pct=60
   if long_pct>=70:
-   final=f"🚀 STRONG BULLISH - LONG {long_pct}%"
+   final=f"🚀 STRONG BULLISH - LONG {long_pct}% {final_tag}"
   elif short_pct>=70:
-   final=f"📉 STRONG BEARISH - SHORT {short_pct}%"
+   final=f"📉 STRONG BEARISH - SHORT {short_pct}% {final_tag}"
   elif long_pct>=55:
    final=f"🟢 BULLISH - LONG Fav {long_pct}%"
   elif short_pct>=55:
@@ -555,26 +666,22 @@ async def trend_cmd(u,c):
    return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
   liq_safe=((e-liq_real)/e*100) if liq_real!=0 and sz>0 else ((liq_real-e)/e*100) if liq_real!=0 else 0
   vwap_status="ABOVE ✅" if e>s5['vwap'] else "BELOW ❌"
-  txt=f"""📊 TREND V120 - 7 FEATURES
+  txt=f"""📊 TREND V121 NO LOSS
 BTC: {e:.1f} Bal: ${bal:.2f} 
 POS: {sz} UPNL ${upnl_real:.2f} Entry {entry_real:.1f}
 Liq: {liq_real:.0f} ({liq_safe:.2f}% Safe) Margin ${margin_real:.2f}
+CVD: {cvd_status} | LIQ: {sweep}
 5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
    EMA9 {s5['ema9']:.1f} vs EMA21 {s5['ema21']:.1f}
    RSI {s5['rsi']} {st_icon(s5['st'])} ST {s5['st']}
-   VWAP {s5['vwap']:.1f} {vwap_status} | Vol {s5['vol_pct']}% {'🔥' if s5['vol_pct']>120 else '✅'} | ATR {s5['atr']:.1f}
+   VWAP {s5['vwap']:.1f} {vwap_status} | Vol {s5['vol_pct']}% | ATR {s5['atr']:.1f}
 15M: {icon(s15['ema_sig'])} {s15['ema_sig']}
-   EMA9 {s15['ema9']:.1f} vs EMA21 {s15['ema21']:.1f}
-   RSI {s15['rsi']} {st_icon(s15['st'])} ST {s15['st']}
-   VWAP {s15['vwap']:.1f} | ATR {s15['atr']:.1f}
 1H: {icon(s60['ema_sig'])} {s60['ema_sig']}
-   RSI {s60['rsi']} {st_icon(s60['st'])} ST {s60['st']}
-   VWAP {s60['vwap']:.1f}
-OI: {ticker['oi']:.0f} | Vol Ticker: {ticker['vol']:.2f}
+OI: {ticker['oi']:.0f}
 FINAL: {final}
 LONG {long_pct}% | SHORT {short_pct}%
 OrderID: {order_id}
-ATR SL: {s5['atr']*1.5:.1f} Dynamic | TP {TP}% Trail {TRAIL_TP}%
+BE: ${BE_PROFIT_DOLLAR} Profit la SL=Entry LOSS $0 | 70% BOOK LIVE ✅
 """
   await u.message.reply_text(txt)
  except Exception as ex:
@@ -608,8 +715,9 @@ async def ask_perm(u, side):
  e=price()
  s5=get_pro_signal("5m")
  vwap_status="ABOVE ✅" if e>s5['vwap'] else "BELOW ❌"
+ cvd_status, sweep, _ = calc_cvd_and_liquidity()
  kb=[[InlineKeyboardButton("✅ YES", callback_data=f"{side}_yes"), InlineKeyboardButton("❌ NO", callback_data="no")]]
- await u.message.reply_text(f"🔥 CONFIRM {side.upper()}?\n\nQty {lots} Lot ({lots*0.001} BTC) Price {e:.1f}\nVWAP: {s5['vwap']:.1f} {vwap_status} | Vol: {s5['vol_pct']}% | ATR: {s5['atr']:.1f}\nSL ATR x1.5 = {e - s5['atr']*1.5 if side=='long' else e + s5['atr']*1.5:.1f} | TP {TP}% Trail {TRAIL_TP}%\nLiq Safe Calc Included ✅", reply_markup=InlineKeyboardMarkup(kb))
+ await u.message.reply_text(f"🔥 CONFIRM {side.upper()}?\n\nQty {lots} Lot ({lots*0.001} BTC) Price {e:.1f}\nVWAP: {s5['vwap']:.1f} {vwap_status} | Vol: {s5['vol_pct']}% | ATR: {s5['atr']:.1f}\nCVD: {cvd_status} | {sweep}\nSL: BE @ +${BE_PROFIT_DOLLAR} LOSS $0 | TP {TP}% Trail {TRAIL_TP}%\nLiq Safe ✅", reply_markup=InlineKeyboardMarkup(kb))
 async def short_cmd(u,c):
  await ask_perm(u,"short")
 async def long_cmd(u,c):
@@ -648,8 +756,10 @@ async def button(u,c):
    LAST_POS_SIZE[q.from_user.id]=lots if is_long else -lots
    ENTRY_TIME[q.from_user.id]=time.time()
    TRAILING_ACTIVE[q.from_user.id]=False
+   BE_DONE[q.from_user.id]=False
+   PARTIAL_DONE[q.from_user.id]=False
    s5=get_pro_signal("5m")
-   await q.edit_message_text(f"✅ {side.upper()} CONFIRMED & DONE!\n\nEntry: {e:.1f} | OrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP: {s5['vwap']:.1f} | Vol: {s5['vol_pct']}% | ATR SL: {s5['atr']*1.5:.1f}\nBest tracking start {e}\nNo Alert While LIVE ✅\n\nV120: UPNL + Liq Safe + VWAP will show on next trail!")
+   await q.edit_message_text(f"✅ {side.upper()} CONFIRMED & DONE! V121 NO LOSS\n\nEntry: {e:.1f} | OrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP: {s5['vwap']:.1f} | Vol: {s5['vol_pct']}% | ATR {s5['atr']*1.5:.1f}\nBE @ +${BE_PROFIT_DOLLAR} LOSS $0 | 70% AUTO BOOK ✅\nBest tracking start {e}")
    CONFIRM_PENDING.pop(q.from_user.id,None)
    return
   if data=="confirm_no":
@@ -687,8 +797,10 @@ async def button(u,c):
   LAST_POS_SIZE[q.from_user.id]=-lots if side=="sell" else lots
   ENTRY_TIME[q.from_user.id]=time.time()
   TRAILING_ACTIVE[q.from_user.id]=False
+  BE_DONE[q.from_user.id]=False
+  PARTIAL_DONE[q.from_user.id]=False
   s5=get_pro_signal("5m")
-  await q.edit_message_text(f"{side.upper()} DONE ✅ SL TRAIL START V120!\nEntry {e} ATR SL {s5['atr']*1.5:.1f} Dynamic TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP {s5['vwap']:.1f} Vol {s5['vol_pct']}% ATR {s5['atr']:.1f}\nBest tracking start {e}\nNo Alert While LIVE ✅")
+  await q.edit_message_text(f"{side.upper()} DONE ✅ V121 NO LOSS!\nEntry {e} ATR SL {s5['atr']*1.5:.1f} BE @ +${BE_PROFIT_DOLLAR} TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP {s5['vwap']:.1f} Vol {s5['vol_pct']}% 70% BOOK LIVE ✅\nBest tracking start {e}")
  except Exception as e:
   print(f"button error {e}")
 async def close_cmd(u,c):
@@ -714,6 +826,8 @@ async def close_cmd(u,c):
    LAST_ORDER_ID.pop(uid,None)
    TRAILING_ACTIVE.pop(uid,None)
    LAST_BEST_ALERT.pop(uid,None)
+   BE_DONE.pop(uid,None)
+   PARTIAL_DONE.pop(uid,None)
    IS_CLOSING[uid]=False
    cancel_all_orders()
    return
@@ -732,6 +846,8 @@ async def close_cmd(u,c):
   LAST_ORDER_ID.pop(uid,None)
   TRAILING_ACTIVE.pop(uid,None)
   LAST_BEST_ALERT.pop(uid,None)
+  BE_DONE.pop(uid,None)
+  PARTIAL_DONE.pop(uid,None)
   IS_CLOSING[uid]=False
  except Exception as e:
   await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}")
@@ -752,9 +868,9 @@ def main():
  app.add_handler(CommandHandler("long", long_cmd))
  app.add_handler(CommandHandler("close", close_cmd))
  app.add_handler(CallbackQueryHandler(button))
- app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
- app.job_queue.run_repeating(auto_alert_job, interval=120, first=30)
- print("BOT LIVE V120 ALL 7 FEATURES")
+ app.job_queue.run_repeating(check_positions_job, interval=10, first=10)
+ app.job_queue.run_repeating(auto_alert_job, interval=60, first=30)
+ print("BOT LIVE V121 NO LOSS BE+CVD+70%BOOK")
  app.run_polling(drop_pending_updates=True, allowed_updates=["message","callback_query"])
 if __name__=="__main__":
  main()
