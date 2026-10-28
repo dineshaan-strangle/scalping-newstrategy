@@ -321,7 +321,7 @@ async def start(u,c):
   else: order_id="Fetching..."
  if not order_id: order_id="None"
  liq_safe=((cur-liq)/cur*100) if liq!=0 and sz>0 else ((liq-cur)/cur*100) if liq!=0 else 0
- txt=f"🤖 BOT V125 CLOSED FIX ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nOrderID: {order_id}\nLOGIC: CLOSED CANDLE + ST+CVD+SWEEP\nBUG FIXED: SHORT/LONG ✅\n/cmds: /qty /lev /trend /long /short /close"
+ txt=f"🤖 BOT V126 FIXED ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nOrderID: {order_id}\nLOGIC: CLOSED CANDLE + ST+CVD+SWEEP\nBUG FIXED: SHORT/LONG + Syntax ✅\n/cmds: /qty /lev /trend /long /short /close"
  await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
@@ -332,7 +332,7 @@ async def trend_cmd(u,c):
    fetched=get_latest_order_id_from_api()
    if fetched: order_id=fetched; LAST_ORDER_ID[uid]=fetched
   if not order_id: order_id="None"
-  await u.message.reply_text("📊 Loading V125 CLOSED...")
+  await u.message.reply_text("📊 Loading V126 CLOSED...")
   s5=get_pro_signal("5m"); s15=get_pro_signal("15m"); s60=get_pro_signal("1h"); long_pct, short_pct=calc_score(s5,s15,s60,cvd_status,sweep)
   final_tag="🟢 BOOM CLOSED ✅" if long_pct>=70 or short_pct>=70 else "⚖️ WAIT"
   if long_pct>=70 and cvd_status=="BEARISH": final_tag="🟡 WEAK - CVD BEARISH SKIP"; long_pct=60
@@ -345,7 +345,7 @@ async def trend_cmd(u,c):
   def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
   liq_safe=((e-liq_real)/e*100) if liq_real!=0 and sz>0 else ((liq_real-e)/e*100) if liq_real!=0 else 0
   vwap_status="ABOVE ✅" if e>s5['vwap'] else "BELOW ❌"
-  txt=f"""📊 TREND V125 CLOSED FIXED
+  txt=f"""📊 TREND V126 CLOSED FIXED
 BTC Live: {e:.1f} Closed: {s5['price']:.1f} Bal: ${bal:.2f} 
 POS: {sz} UPNL ${upnl_real:.2f} Entry {entry_real:.1f}
 Liq: {liq_real:.0f} ({liq_safe:.2f}% Safe)
@@ -363,6 +363,7 @@ async def qty_cmd(u,c):
  ALERT_USERS.add(u.effective_user.id)
  try: lots=int(float(c.args[0])) if c.args else 1; USER_QTY[u.effective_user.id]=lots; await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC - LOCKED")
  except: await u.message.reply_text(f"Use /qty 1 to 4")
+
 async def lev_cmd(u,c):
  ALERT_USERS.add(u.effective_user.id); l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l); await u.message.reply_text(f"✅ Lev {l}x - LOCKED")
 
@@ -389,11 +390,15 @@ async def button(u,c):
    if abs(sz_check)>0.0000001: oid=LAST_ORDER_ID.get(q.from_user.id, "Unknown"); await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid}! Use /close first!"); return
    lots=USER_QTY.get(q.from_user.id,1); e=price(); side="buy" if is_long else "sell"; res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order"})
    if not res.get('success'): bal=get_balance(); await q.edit_message_text(f"❌ Failed! Bal ${bal:.2f} Error: {res}"); return
-   try: order_id=res.get('result', {}).get('id', 0); 
-    if not order_id: order_id=int(time.time()); LAST_ORDER_ID[q.from_user.id]=order_id
-   except: LAST_ORDER_ID[q.from_user.id]=int(time.time())
+   try:
+    order_id=res.get('result', {}).get('id', 0)
+    if not order_id:
+     order_id=int(time.time())
+    LAST_ORDER_ID[q.from_user.id]=order_id
+   except:
+    LAST_ORDER_ID[q.from_user.id]=int(time.time())
    ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_BEST_ALERT[q.from_user.id]=e; LAST_POS_SIZE[q.from_user.id]=lots if is_long else -lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False; BE_DONE[q.from_user.id]=False; PARTIAL_DONE[q.from_user.id]=False
-   s5=get_pro_signal("5m"); await q.edit_message_text(f"✅ {side.upper()} CONFIRMED CLOSED! V125\n\nEntry: {e:.1f} Closed: {s5['price']:.1f} OrderID: {LAST_ORDER_ID[q.from_user.id]}\nBE @ +${BE_PROFIT_DOLLAR} | 70% BOOK ✅"); CONFIRM_PENDING.pop(q.from_user.id,None); return
+   s5=get_pro_signal("5m"); await q.edit_message_text(f"✅ {side.upper()} CONFIRMED CLOSED! V126\n\nEntry: {e:.1f} Closed: {s5['price']:.1f} OrderID: {LAST_ORDER_ID[q.from_user.id]}\nBE @ +${BE_PROFIT_DOLLAR} | 70% BOOK ✅"); CONFIRM_PENDING.pop(q.from_user.id,None); return
   if data=="confirm_no": await q.edit_message_text("❌ Skipped! Next CLOSED candle wait..."); CONFIRM_PENDING.pop(q.from_user.id,None); return
   sz_check,_,_,_,_=get_real_position_full()
   if abs(sz_check)>0.0000001: oid=LAST_ORDER_ID.get(q.from_user.id, "Unknown"); await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid}! Use /close first!"); return
@@ -401,11 +406,15 @@ async def button(u,c):
   if q.data=="no": await q.edit_message_text("Cancelled ❌"); return
   side="sell" if q.data=="short_yes" else "buy"; res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order"})
   if not res.get('success'): bal=get_balance(); await q.edit_message_text(f"❌ Failed! Bal ${bal:.2f} Error: {res}"); return
-  try: order_id=res.get('result', {}).get('id', 0); 
-   if not order_id: order_id=int(time.time()); LAST_ORDER_ID[q.from_user.id]=order_id
-  except: LAST_ORDER_ID[q.from_user.id]=int(time.time())
+  try:
+   order_id=res.get('result', {}).get('id', 0)
+   if not order_id:
+    order_id=int(time.time())
+   LAST_ORDER_ID[q.from_user.id]=order_id
+  except:
+   LAST_ORDER_ID[q.from_user.id]=int(time.time())
   ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_BEST_ALERT[q.from_user.id]=e; LAST_SL[q.from_user.id]=round(e*(1+SL/100),1) if side=="sell" else round(e*(1-SL/100),1); LAST_TP[q.from_user.id]=round(e*(1-TP/100),1) if side=="sell" else round(e*(1+TP/100),1); LAST_POS_SIZE[q.from_user.id]=-lots if side=="sell" else lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False; BE_DONE[q.from_user.id]=False; PARTIAL_DONE[q.from_user.id]=False
-  s5=get_pro_signal("5m"); await q.edit_message_text(f"{side.upper()} DONE ✅ V125 CLOSED!\nEntry {e} Closed {s5['price']:.1f} ATR SL {s5['atr']*1.5:.1f} BE @ +${BE_PROFIT_DOLLAR} TP {TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}")
+  s5=get_pro_signal("5m"); await q.edit_message_text(f"{side.upper()} DONE ✅ V126 CLOSED!\nEntry {e} Closed {s5['price']:.1f} ATR SL {s5['atr']*1.5:.1f} BE @ +${BE_PROFIT_DOLLAR} TP {TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}")
  except Exception as e: print(f"button error {e}")
 
 async def close_cmd(u,c):
@@ -425,6 +434,6 @@ def main():
  app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("qty", qty_cmd)); app.add_handler(CommandHandler("lev", lev_cmd)); app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd)); app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
  app.job_queue.run_repeating(check_positions_job, interval=10, first=10)
  app.job_queue.run_repeating(auto_alert_job, interval=60, first=30)
- print("BOT LIVE V125 CLOSED FIX - MANUAL")
+ print("BOT LIVE V126 FIXED - MANUAL")
  app.run_polling(drop_pending_updates=True, allowed_updates=["message","callback_query"])
 if __name__=="__main__": main()
