@@ -14,6 +14,7 @@ TRAIL_TP = 0.6
 
 USER_QTY = {}
 USER_LEV = {}
+ALERT_USERS = set()
 BEST_PRICE = {}
 ENTRY_PRICE = {}
 LAST_POS_SIZE = {}
@@ -28,7 +29,7 @@ LAST_ALERT_SIGNAL = ""
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self): 
-        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.1 PRO MANUAL + AUTO 70% ALERT')
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.3 PRO + AUTO 70%')
     def do_HEAD(self): 
         self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
@@ -99,20 +100,47 @@ def size_to_lots(real_size):
     if abs(real_size) < 1: return int(abs(real_size)*1000)
     else: return int(abs(real_size))
 
-# ===== V119 PRO INDICATOR =====
+# ===== V119.3 FIXED INDICATOR =====
 def fetch_candles_full(res="5m", count=100):
+    closes, highs, lows = [], [], []
+    cur_live = price()
     try:
         now=int(time.time())
-        secs = {"1m":60,"5m":300,"15m":900,"1h":3600}
-        frm = now - (secs.get(res,300)*count) - 100
-        url=f"{BC}/v2/history/candles"; params={"resolution":res,"symbol":"BTCUSD","start":frm,"end":now}
-        r=requests.get(url, params=params, timeout=10).json()
-        candles=r if isinstance(r,list) else r.get('result',[])
-        closes = [float(c.get('close',0)) for c in candles if float(c.get('close',0))>0]
-        highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
-        lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
+        # TRY B API FIRST
+        try:
+            url=f"{B}/v2/history/candles"
+            params={"resolution":res,"symbol":"MARK:BTCUSD","start":now-86400*3,"end":now}
+            r=requests.get(url, params=params, timeout=8).json()
+            candles=r.get('result',[]) if isinstance(r, dict) else r
+            if len(candles)>10:
+                closes = [float(c.get('close',0)) for c in candles if float(c.get('close',0))>0]
+                highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
+                lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
+        except: pass
+
+        # IF GAP >1% or less data, try BC
+        if len(closes)<20 or (closes and abs(closes[-1]-cur_live)/cur_live>0.015):
+            try:
+                secs = {"1m":60,"5m":300,"15m":900,"1h":3600}
+                frm = now - (secs.get(res.lower(),300)*count) - 1000
+                url=f"{BC}/v2/history/candles"; params={"resolution":res.lower(),"symbol":"BTCUSD","start":frm,"end":now}
+                r=requests.get(url, params=params, timeout=8).json()
+                candles=r if isinstance(r,list) else r.get('result',[])
+                if len(candles)>20:
+                    closes = [float(c.get('close',0)) for c in candles if float(c.get('close',0))>0]
+                    highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
+                    lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
+            except: pass
+
+        # FINAL GAP FIX - inject live price
+        if closes and abs(closes[-1]-cur_live)/cur_live > 0.008:
+            closes[-1] = cur_live
+            highs[-1] = max(highs[-1], cur_live)
+            lows[-1] = min(lows[-1], cur_live)
+
         return closes[-count:], highs[-count:], lows[-count:]
-    except: return [],[],[]
+    except:
+        return [],[],[]
 
 def calc_ema(prices, period):
     if len(prices) < period: return prices[-1] if prices else 0
@@ -188,7 +216,7 @@ def calc_score(s5,s15,s60):
 async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
     global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
     try:
-        if time.time() - LAST_ALERT_TIME < 300: return
+        if time.time() - LAST_ALERT_TIME < 180: return
         s5 = get_pro_signal("5m")
         s15 = get_pro_signal("15m")
         s60 = get_pro_signal("1h")
@@ -197,17 +225,18 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
         signal=""; msg=""
         if long_pct>=70:
             signal=f"LONG_{long_pct}"
-            msg=f"🚀 AUTO ALERT V119.1\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna! CONFIDENCE {long_pct}%"
+            msg=f"🚀 AUTO ALERT V119.3\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna!"
         elif short_pct>=70:
             signal=f"SHORT_{short_pct}"
-            msg=f"📉 AUTO ALERT V119.1\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna! CONFIDENCE {short_pct}%"
+            msg=f"📉 AUTO ALERT V119.3\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna!"
         if signal and signal != LAST_ALERT_SIGNAL:
-            for uid in list(USER_QTY.keys()):
+            all_users = ALERT_USERS.union(set(USER_QTY.keys()))
+            for uid in list(all_users):
                 try: await context.bot.send_message(uid, msg)
                 except: pass
             LAST_ALERT_TIME=time.time()
             LAST_ALERT_SIGNAL=signal
-            print(f"ALERT SENT {signal}")
+            print(f"ALERT SENT {signal} to {len(all_users)} users")
     except Exception as e:
         print(f"auto_alert error {e}")
 
@@ -216,7 +245,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
         if any(IS_CLOSING.values()): return
         cur_p = price()
         cur_size, entry_real, _ = get_real_position()
-        all_uids = set(list(USER_QTY.keys()) + list(LAST_POS_SIZE.keys()) + list(ENTRY_PRICE.keys()) + list(LAST_ORDER_ID.keys()))
+        all_uids = set(list(USER_QTY.keys()) + list(LAST_POS_SIZE.keys()) + list(ENTRY_PRICE.keys()) + list(LAST_ORDER_ID.keys()) + list(ALERT_USERS))
         for uid in list(all_uids):
             if IS_CLOSING.get(uid): continue
             if abs(cur_size) < 0.0000001: continue
@@ -284,13 +313,15 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"check_positions_job error {e}")
 
 async def start(u,c):
+    ALERT_USERS.add(u.effective_user.id)
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V119.1 PRO MANUAL + AUTO 70%\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}%\nAuto Alert: 70%+ LONG/SHORT bot sollum!\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V119.3 PRO MANUAL + AUTO 70% FIXED\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}%\nAuto Alert: ON 70%+ ku auto msg varum!\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
+    ALERT_USERS.add(u.effective_user.id)
     try:
         e=price(); bal=get_balance(); sz,_,_=get_real_position()
         order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
@@ -306,7 +337,7 @@ async def trend_cmd(u,c):
         else: final=f"⚖️ SIDEWAYS - WAIT {long_pct}%/{short_pct}%"
         def icon(sig): return "🟢" if "BULL" in sig else "🔴" if "BEAR" in sig else "⚪"
         def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
-        txt=f"""📊 TREND V119.1 PRO
+        txt=f"""📊 TREND V119.3 PRO FIXED
 BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
 
 5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
@@ -331,13 +362,16 @@ SL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY
         await u.message.reply_text(f"Trend error {ex}")
 
 async def qty_cmd(u,c):
+    ALERT_USERS.add(u.effective_user.id)
     try: lots=int(float(c.args[0])) if c.args else 1; USER_QTY[u.effective_user.id]=lots; await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC")
     except: await u.message.reply_text(f"Use /qty 1 to 4")
 
 async def lev_cmd(u,c):
+    ALERT_USERS.add(u.effective_user.id)
     l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l); await u.message.reply_text(f"✅ Lev {l}x")
 
 async def ask_perm(u, side):
+    ALERT_USERS.add(u.effective_user.id)
     sz,entry,upnl=get_real_position()
     if abs(sz)>0.0000001:
         oid = LAST_ORDER_ID.get(u.effective_user.id, "Unknown")
@@ -353,6 +387,7 @@ async def long_cmd(u,c): await ask_perm(u,"long")
 async def button(u,c):
     q=u.callback_query; await q.answer()
     try:
+        ALERT_USERS.add(q.from_user.id)
         sz_check,_,_=get_real_position()
         if abs(sz_check)>0.0000001:
             oid = LAST_ORDER_ID.get(q.from_user.id, "Unknown")
@@ -377,6 +412,7 @@ async def button(u,c):
         print(f"button error {e}")
 
 async def close_cmd(u,c):
+    ALERT_USERS.add(u.effective_user.id)
     uid=u.effective_user.id; IS_CLOSING[uid]=True
     saved_id = LAST_ORDER_ID.get(uid, "No ID")
     await u.message.reply_text(f"🔍 Searching REAL Delta...\nRemember OrderID: {saved_id}")
@@ -401,7 +437,7 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
-    app.job_queue.run_repeating(auto_alert_job, interval=120, first=60)
-    print("BOT LIVE V119.1 PRO MANUAL + AUTO 70% ALERT - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
+    app.job_queue.run_repeating(auto_alert_job, interval=120, first=30)
+    print("BOT LIVE V119.3 PRO MANUAL + AUTO 70% FIXED"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
