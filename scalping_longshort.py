@@ -20,10 +20,10 @@ LAST_SL = {}
 LAST_TP = {}
 ENTRY_TIME = {}
 IS_CLOSING = {}
-LAST_ORDER_ID = {}  # ORDER ID REMEMBER
+LAST_ORDER_ID = {}  # ORDER ID REMEMBER - UNGA IDEA!
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V114 ORDER ID VISIBLE')
+    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V115 FINAL ORDER ID VISIBLE - NO FALSE CLOSE')
     def log_message(self, format, *args): return
 
 def run_health_server():
@@ -105,11 +105,11 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
         
         for uid in list(all_uids):
             if IS_CLOSING.get(uid): continue
-            last_size = LAST_POS_SIZE.get(uid, 0)
             entry = ENTRY_PRICE.get(uid, entry_real)
             sl_price = LAST_SL.get(uid)
             order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
             
+            # ONLY SL HIT CHECK - NO FALSE CLOSE!
             if cur_size != 0 and entry != 0 and sl_price:
                 force = False
                 if cur_size < 0 and cur_p >= float(sl_price): force = True
@@ -128,18 +128,6 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                         BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
                         print(f"SL CLOSED OrderID {order_id_saved} REMOVED FROM REMEMBER")
                         continue
-            
-            if last_size != 0 and abs(cur_size) < 0.0000001:
-                await asyncio.sleep(3)
-                verify_size,_,_ = get_real_position()
-                if abs(verify_size) < 0.0000001:
-                    cancel_all_orders()
-                    try: await context.bot.send_message(uid, f"🚨 POSITION CLOSED! {cur_p} ✅ OrderID {order_id_saved} Product 27 Verified")
-                    except: pass
-                    print(f"POSITION CLOSED OrderID {order_id_saved} REMOVED")
-                    BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
-                else:
-                    LAST_POS_SIZE[uid] = verify_size
 
         for uid in all_uids:
             if cur_size != 0: LAST_POS_SIZE[uid] = cur_size
@@ -151,7 +139,7 @@ async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None - No Trade Yet")
-    txt=f"🤖 BOT V114 ORDER ID VISIBLE\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nRemember OrderID: {order_id} Product 27\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V115 FINAL\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nRemember OrderID: {order_id} Product 27\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 def get_candles_detail(res="5"):
@@ -180,7 +168,7 @@ async def trend_cmd(u,c):
     greens=sum([1 for t in [t5,t15,t60] if "BULLISH" in t]); reds=sum([1 for t in [t5,t15,t60] if "BEARISH" in t])
     final="🚀 BULLISH - LONG" if greens>=2 else "📉 BEARISH - SHORT" if reds>=2 else "⚖️ SIDEWAYS"
     order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
-    txt=f"📊 TREND V114\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} Remember OrderID: {order_id} Product 27"
+    txt=f"📊 TREND V115\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} Remember OrderID: {order_id} Product 27"
     await u.message.reply_text(txt)
 
 async def qty_cmd(u,c):
@@ -236,21 +224,19 @@ async def button(u,c):
                 await q.edit_message_text(f"FAILED: {res}")
                 return
 
-        # === V114 ORDER ID RENDER LOG + BOT + REMEMBER - UNGA IDEA! ===
         try:
             order_id = res.get('result', {}).get('id', 0)
             if not order_id:
                 order_id = int(time.time())
             LAST_ORDER_ID[q.from_user.id] = order_id
-            # RENDER LOG LA VARUM!
             print(f"========================================")
             print(f"ORDER ID SAVED: {order_id} PRODUCT 27 SIZE {lots} SIDE {side}")
+            print(f"RENDER LOG ORDER ID VISIBLE: {order_id}")
             print(f"REMEMBER DICT: {LAST_ORDER_ID}")
             print(f"========================================")
         except Exception as ex:
             print(f"ORDER ID SAVE ERROR {ex}")
             LAST_ORDER_ID[q.from_user.id] = int(time.time())
-            print(f"ORDER ID FALLBACK SAVED: {LAST_ORDER_ID[q.from_user.id]}")
 
         try:
             if side=="sell":
@@ -264,7 +250,6 @@ async def button(u,c):
         ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_SL[q.from_user.id]=sl; LAST_TP[q.from_user.id]=tp
         LAST_POS_SIZE[q.from_user.id]= -lots if side=="sell" else lots
         ENTRY_TIME[q.from_user.id]=time.time()
-        # BOT LA SHOW AGUM!
         await q.edit_message_text(f"{side.upper()} DONE ✅\nEntry {e} SL {sl} TP {tp} Qty {lots} Lot\nOrderID: {LAST_ORDER_ID[q.from_user.id]} Remembered!\nProduct 27 Bot Trade")
 
     except Exception as e:
@@ -276,14 +261,11 @@ async def close_cmd(u,c):
     uid=u.effective_user.id
     IS_CLOSING[uid]=True
     saved_id = LAST_ORDER_ID.get(uid, "No ID - Remember Empty")
-    # RENDER LOG + BOT RENDUME ORDER ID!
     print(f"========== CLOSE START OrderID {saved_id} Product 27 ==========")
     await u.message.reply_text(f"🔍 Searching REAL Delta Product 27...\nRemember OrderID: {saved_id} Product 27")
     try:
         sz,_,_=get_real_position()
-
         await u.message.reply_text(f"📊 REAL Delta: {sz} BTC (Product 27) Remember OrderID: {saved_id}")
-
         if abs(sz)<0.0000001:
             await u.message.reply_text(f"✅ Already Positions (0) - OrderID {saved_id} Product 27 Already Closed!")
             print(f"CLOSE ALREADY 0 OrderID {saved_id} REMOVED")
@@ -291,18 +273,15 @@ async def close_cmd(u,c):
             IS_CLOSING[uid]=False
             cancel_all_orders()
             return
-
         lots = size_to_lots(sz)
         if lots<1: lots=1
         side="buy" if sz<0 else "sell"
         await u.message.reply_text(f"Found Remember OrderID {saved_id}: {sz} BTC = {lots} lots, Closing {side} Product ID 27...")
         print(f"CLOSING OrderID {saved_id} Product 27 Size {sz} Lots {lots} Side {side}")
-
         res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
         await asyncio.sleep(3)
         cancel_all_orders()
         await asyncio.sleep(1)
-
         sz_check,_,_=get_real_position()
         if abs(sz_check)<0.0000001:
             await u.message.reply_text(f"✅ CLOSED! Remember OrderID {saved_id} Product 27 {sz} BTC Closed at {price():.1f} ✅")
@@ -316,10 +295,8 @@ async def close_cmd(u,c):
             cancel_all_orders()
             await u.message.reply_text(f"⚠️ Retry done OrderID {saved_id}, checking...")
             print(f"RETRY CLOSE OrderID {saved_id} Still {sz_check}")
-        
         BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
         IS_CLOSING[uid]=False
-
     except Exception as e:
         await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}")
         print(f"CLOSE ERROR OrderID {saved_id} {e}")
@@ -332,6 +309,6 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=30, first=15)
-    print("BOT LIVE V114 ORDER ID VISIBLE IN LOG + BOT + CLOSE - PRODUCT 27"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V115 FINAL ORDER ID VISIBLE - NO FALSE CLOSE - PRODUCT 27"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
