@@ -26,7 +26,7 @@ TRAILING_ACTIVE = {}
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self): 
-        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V118 FIX HEAD 501 + BOT TRAILING')
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119 PRO MANUAL NO AUTO')
     def do_HEAD(self): 
         self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
@@ -97,25 +97,91 @@ def size_to_lots(real_size):
     if abs(real_size) < 1: return int(abs(real_size)*1000)
     else: return int(abs(real_size))
 
+# ===== V119 PRO INDICATOR FUNCTIONS - NO AUTO =====
+def fetch_candles_full(res="5m", count=100):
+    try:
+        now=int(time.time())
+        # 5m 100 candle = 500 min ~ 8 hours
+        secs = {"1m":60,"5m":300,"15m":900,"1h":3600}
+        frm = now - (secs.get(res,300)*count) - 100
+        url=f"{BC}/v2/history/candles"; params={"resolution":res,"symbol":"BTCUSD","start":frm,"end":now}
+        r=requests.get(url, params=params, timeout=10).json()
+        candles=r if isinstance(r,list) else r.get('result',[])
+        closes = [float(c.get('close',0)) for c in candles if float(c.get('close',0))>0]
+        highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
+        lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
+        return closes[-count:], highs[-count:], lows[-count:]
+    except: return [],[],[]
+
+def calc_ema(prices, period):
+    if len(prices) < period: return prices[-1] if prices else 0
+    k = 2/(period+1)
+    ema = sum(prices[:period])/period
+    for p in prices[period:]:
+        ema = p*k + ema*(1-k)
+    return ema
+
+def calc_rsi(prices, period=14):
+    if len(prices) < period+1: return 50
+    gains=0; losses=0
+    for i in range(1, period+1):
+        diff = prices[-i] - prices[-i-1]
+        if diff>0: gains+=diff
+        else: losses+=-diff
+    if losses==0: return 70 if gains>0 else 50
+    rs = (gains/period)/(losses/period)
+    rsi = 100 - (100/(1+rs))
+    # Wilder smoothing for last value
+    return round(rsi,1)
+
+def calc_supertrend(closes, highs, lows, period=10, mult=3):
+    try:
+        if len(closes)<period: return "SIDE", closes[-1] if closes else 0
+        # ATR
+        tr_list=[]
+        for i in range(1,len(closes)):
+            tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            tr_list.append(tr)
+        atr = sum(tr_list[-period:])/period if len(tr_list)>=period else sum(tr_list)/len(tr_list) if tr_list else 0
+        hl2 = (highs[-1]+lows[-1])/2
+        upper = hl2 + mult*atr
+        lower = hl2 - mult*atr
+        if closes[-1] > upper: return "GREEN BULLISH", lower
+        elif closes[-1] < lower: return "RED BEARISH", upper
+        else:
+            # Check prev trend
+            if closes[-1] > closes[-2]: return "GREEN BULLISH", lower
+            else: return "RED BEARISH", upper
+    except: return "SIDE", 0
+
+def get_pro_signal(res_label):
+    # res_label: 5m,15m,1h
+    closes,highs,lows = fetch_candles_full(res_label, 100)
+    if len(closes)<25:
+        return {"ema": "SIDE", "rsi":50, "st":"SIDE", "price":price()}
+    ema9 = calc_ema(closes,9)
+    ema21 = calc_ema(closes,21)
+    rsi = calc_rsi(closes,14)
+    st_trend, st_val = calc_supertrend(closes,highs,lows,10,3)
+    cur = closes[-1]
+    ema_sig = "BULLISH" if ema9>ema21 else "BEARISH" if ema9<ema21 else "SIDEWAYS"
+    return {"ema9":ema9,"ema21":ema21,"ema_sig":ema_sig,"rsi":rsi,"st":st_trend,"st_val":st_val,"price":cur}
+
 async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         if any(IS_CLOSING.values()): return
         cur_p = price()
         cur_size, entry_real, _ = get_real_position()
         all_uids = set(list(USER_QTY.keys()) + list(LAST_POS_SIZE.keys()) + list(ENTRY_PRICE.keys()) + list(LAST_ORDER_ID.keys()))
-        
         for uid in list(all_uids):
             if IS_CLOSING.get(uid): continue
             if abs(cur_size) < 0.0000001: continue
-            
             entry = ENTRY_PRICE.get(uid, entry_real)
             if entry == 0: entry = entry_real
             if entry == 0: continue
-            
             best = BEST_PRICE.get(uid, entry)
             order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
             is_trailing = TRAILING_ACTIVE.get(uid, False)
-            
             if cur_size > 0:
                 if cur_p > best:
                     BEST_PRICE[uid] = cur_p
@@ -124,10 +190,8 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                 if cur_p < best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
-
             close_reason = None
             side_to_close = None
-            
             if cur_size > 0:
                 sl_price = entry * (1 - SL/100)
                 tp_price = entry * (1 + TP/100)
@@ -158,7 +222,6 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                     if cur_p >= trail_close_price:
                         close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "buy"
-
             if close_reason and side_to_close:
                 lots = size_to_lots(cur_size)
                 if lots < 1: lots = 1
@@ -171,10 +234,8 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                     BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None)
                 else:
                     print(f"CLOSE FAILED STILL {sz_check}")
-
         for uid in all_uids:
             if cur_size != 0: LAST_POS_SIZE[uid] = cur_size
-            
     except Exception as e:
         print(f"check_positions_job error {e}")
 
@@ -182,32 +243,77 @@ async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V118 FIX HEAD + TRAIL\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}% BOT ONLY\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V119 PRO MANUAL\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}% BOT ONLY\nNO AUTO - Manual Only!\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
-
-def get_candles_detail(res="5"):
-    try:
-        res_map={"5":"5m","15":"15m","60":"1h"}; r_res=res_map.get(str(res),"5m")
-        now=int(time.time()); frm=now-7200
-        url=f"{BC}/v2/history/candles"; params={"resolution":r_res,"symbol":"BTCUSD","start":frm,"end":now}
-        r=requests.get(url, params=params, timeout=8).json()
-        candles=r if isinstance(r,list) else r.get('result',[])
-        if len(candles) >= 3:
-            last3 = candles[-3:]; closes = [float(x.get('close',0)) for x in last3]
-            if closes[0] < closes[1] < closes[2]: return "🟢 BULLISH", closes[2]
-            elif closes[0] > closes[1] > closes[2]: return "🔴 BEARISH", closes[2]
-            else: return "⚪ SIDEWAYS", closes[2]
-        return "⚪ SIDEWAYS",price()
-    except: return "⚪ SIDEWAYS",price()
 
 async def trend_cmd(u,c):
-    e=price(); bal=get_balance(); sz,_,_=get_real_position()
-    t5,c5=get_candles_detail("5"); t15,c15=get_candles_detail("15"); t60,c60=get_candles_detail("60")
-    greens=sum([1 for t in [t5,t15,t60] if "BULLISH" in t]); reds=sum([1 for t in [t5,t15,t60] if "BEARISH" in t])
-    final="🚀 BULLISH - LONG" if greens>=2 else "📉 BEARISH - SHORT" if reds>=2 else "⚖️ SIDEWAYS"
-    order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
-    txt=f"📊 TREND V118\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} OrderID: {order_id}\nSL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY HEAD FIX"
-    await u.message.reply_text(txt)
+    try:
+        e=price(); bal=get_balance(); sz,_,_=get_real_position()
+        order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
+        await u.message.reply_text("📊 Loading PRO Indicators... 5m/15m/1h")
+        s5 = get_pro_signal("5m")
+        s15 = get_pro_signal("15m")
+        s60 = get_pro_signal("1h")
+
+        # Scoring
+        long_score=0; short_score=0
+        # 5M - 50% weight
+        if s5['ema_sig']=="BULLISH": long_score+=20
+        elif s5['ema_sig']=="BEARISH": short_score+=20
+        if s5['rsi']<35: long_score+=15
+        elif s5['rsi']>65: short_score+=15
+        if "GREEN" in s5['st']: long_score+=15
+        elif "RED" in s5['st']: short_score+=15
+        
+        # 15M - 30% weight
+        if s15['ema_sig']=="BULLISH": long_score+=12
+        elif s15['ema_sig']=="BEARISH": short_score+=12
+        if "GREEN" in s15['st']: long_score+=18
+        elif "RED" in s15['st']: short_score+=18
+
+        # 1H - 20% weight
+        if s60['ema_sig']=="BULLISH": long_score+=10
+        elif s60['ema_sig']=="BEARISH": short_score+=10
+        if "GREEN" in s60['st']: long_score+=10
+        elif "RED" in s60['st']: short_score+=10
+
+        total = long_score+short_score
+        long_pct = int(long_score/total*100) if total>0 else 50
+        short_pct = 100-long_pct
+
+        if long_pct>=70: final="🚀 STRONG BULLISH - LONG 70%+"
+        elif short_pct>=70: final="📉 STRONG BEARISH - SHORT 70%+"
+        elif long_pct>=55: final="🟢 BULLISH - LONG Fav"
+        elif short_pct>=55: final="🔴 BEARISH - SHORT Fav"
+        else: final="⚖️ SIDEWAYS - WAIT"
+
+        # Icons
+        def icon(sig): return "🟢" if "BULL" in sig else "🔴" if "BEAR" in sig else "⚪"
+        def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
+
+        txt=f"""📊 TREND V119 PRO MANUAL
+BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
+
+5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
+   EMA9 {s5['ema9']:.1f} vs EMA21 {s5['ema21']:.1f}
+   RSI {s5['rsi']} {st_icon(s5['st'])} ST {s5['st']}
+
+15M: {icon(s15['ema_sig'])} {s15['ema_sig']}
+   EMA9 {s15['ema9']:.1f} vs EMA21 {s15['ema21']:.1f}
+   RSI {s15['rsi']} {st_icon(s15['st'])} ST {s15['st']}
+
+1H: {icon(s60['ema_sig'])} {s60['ema_sig']}
+   RSI {s60['rsi']} {st_icon(s60['st'])} ST {s60['st']}
+
+FINAL: {final}
+LONG {long_pct}% | SHORT {short_pct}%
+OrderID: {order_id}
+💡 Manual Only: {final} vantha /long or /short adinga!
+SL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY
+"""
+        await u.message.reply_text(txt)
+    except Exception as ex:
+        await u.message.reply_text(f"Trend error {ex}")
 
 async def qty_cmd(u,c):
     try: lots=int(float(c.args[0])) if c.args else 1; USER_QTY[u.effective_user.id]=lots; await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC")
@@ -281,6 +387,6 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
-    print("BOT LIVE V118 HEAD FIX + BOT TRAILING - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V119 PRO MANUAL NO AUTO - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
