@@ -29,7 +29,7 @@ LAST_ALERT_SIGNAL = ""
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self): 
-        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.3 PRO + AUTO 70%')
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.5 SL TRAIL + NO ALERT WHEN LIVE')
     def do_HEAD(self): 
         self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
@@ -100,13 +100,11 @@ def size_to_lots(real_size):
     if abs(real_size) < 1: return int(abs(real_size)*1000)
     else: return int(abs(real_size))
 
-# ===== V119.3 FIXED INDICATOR =====
 def fetch_candles_full(res="5m", count=100):
     closes, highs, lows = [], [], []
     cur_live = price()
     try:
         now=int(time.time())
-        # TRY B API FIRST
         try:
             url=f"{B}/v2/history/candles"
             params={"resolution":res,"symbol":"MARK:BTCUSD","start":now-86400*3,"end":now}
@@ -117,8 +115,6 @@ def fetch_candles_full(res="5m", count=100):
                 highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
                 lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
         except: pass
-
-        # IF GAP >1% or less data, try BC
         if len(closes)<20 or (closes and abs(closes[-1]-cur_live)/cur_live>0.015):
             try:
                 secs = {"1m":60,"5m":300,"15m":900,"1h":3600}
@@ -131,13 +127,10 @@ def fetch_candles_full(res="5m", count=100):
                     highs = [float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]
                     lows = [float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]
             except: pass
-
-        # FINAL GAP FIX - inject live price
         if closes and abs(closes[-1]-cur_live)/cur_live > 0.008:
             closes[-1] = cur_live
             highs[-1] = max(highs[-1], cur_live)
             lows[-1] = min(lows[-1], cur_live)
-
         return closes[-count:], highs[-count:], lows[-count:]
     except:
         return [],[],[]
@@ -216,6 +209,10 @@ def calc_score(s5,s15,s60):
 async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
     global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
     try:
+        # FIX 2: ORDER LIVE LA IRUKKA ALERT VARA KUDATHU
+        live_sz,_,_=get_real_position()
+        if abs(live_sz)>0.0000001:
+            return  # Position open -> No alert
         if time.time() - LAST_ALERT_TIME < 180: return
         s5 = get_pro_signal("5m")
         s15 = get_pro_signal("15m")
@@ -225,10 +222,10 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
         signal=""; msg=""
         if long_pct>=70:
             signal=f"LONG_{long_pct}"
-            msg=f"🚀 AUTO ALERT V119.3\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna!"
+            msg=f"🚀 AUTO ALERT V119.5\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna!"
         elif short_pct>=70:
             signal=f"SHORT_{short_pct}"
-            msg=f"📉 AUTO ALERT V119.3\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna!"
+            msg=f"📉 AUTO ALERT V119.5\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna!"
         if signal and signal != LAST_ALERT_SIGNAL:
             all_users = ALERT_USERS.union(set(USER_QTY.keys()))
             for uid in list(all_users):
@@ -255,46 +252,60 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
             best = BEST_PRICE.get(uid, entry)
             order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
             is_trailing = TRAILING_ACTIVE.get(uid, False)
-            if cur_size > 0:
+            
+            # FIX 1: SL TRAILING FROM ENTRY - BEST UPDATE FROM START
+            if cur_size > 0:  # LONG
                 if cur_p > best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
-            else:
+                    try:
+                        sl_now = best * (1 - SL/100)
+                        if int(cur_p) % 80 < 15:
+                            await context.bot.send_message(uid, f"📈 LONG SL TRAIL\nBest {best:.1f} SL {sl_now:.1f} (+{(best-entry):.1f}$)\nEntry {entry:.1f} Order {order_id_saved}")
+                    except: pass
+            else:  # SHORT
                 if cur_p < best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
+                    try:
+                        sl_now = best * (1 + SL/100)
+                        if int(cur_p) % 80 < 15:
+                            await context.bot.send_message(uid, f"📉 SHORT SL TRAIL\nBest {best:.1f} SL {sl_now:.1f} (+{(entry-best):.1f}$)\nEntry {entry:.1f} Order {order_id_saved}")
+                    except: pass
+            
             close_reason = None
             side_to_close = None
-            if cur_size > 0:
-                sl_price = entry * (1 - SL/100)
+            if cur_size > 0:  # LONG
+                sl_price = best * (1 - SL/100)  # TRAILING SL
                 tp_price = entry * (1 + TP/100)
                 if cur_p <= sl_price:
-                    close_reason = f"SL HIT {SL}% {cur_p:.1f} <= {sl_price:.1f}"
+                    close_reason = f"SL TRAIL Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f} OrderID {order_id_saved}"
                     side_to_close = "sell"
                 elif cur_p >= tp_price:
                     if not is_trailing:
                         TRAILING_ACTIVE[uid] = True
-                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{ TRAIL_TP}% reverse la close!")
+                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{TRAIL_TP}% reverse la close!")
                         except: pass
                     trail_close_price = best * (1 - TRAIL_TP/100)
                     if cur_p <= trail_close_price:
                         close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "sell"
-            else:
-                sl_price = entry * (1 + SL/100)
+            else:  # SHORT
+                sl_price = best * (1 + SL/100)
                 tp_price = entry * (1 - TP/100)
                 if cur_p >= sl_price:
-                    close_reason = f"SL HIT {SL}% {cur_p:.1f} >= {sl_price:.1f}"
+                    close_reason = f"SL TRAIL Best {best:.1f} SL {sl_price:.1f} >= {cur_p:.1f} OrderID {order_id_saved}"
                     side_to_close = "buy"
                 elif cur_p <= tp_price:
                     if not is_trailing:
                         TRAILING_ACTIVE[uid] = True
-                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{ TRAIL_TP}% reverse la close!")
+                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{TRAIL_TP}% reverse la close!")
                         except: pass
                     trail_close_price = best * (1 + TRAIL_TP/100)
                     if cur_p >= trail_close_price:
                         close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "buy"
+            
             if close_reason and side_to_close:
                 lots = size_to_lots(cur_size)
                 if lots < 1: lots = 1
@@ -302,7 +313,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(2)
                 sz_check,_,_=get_real_position()
                 if abs(sz_check) < 0.0000001:
-                    try: await context.bot.send_message(uid, f"✅ CLOSED! {close_reason}\nPrice {cur_p:.1f} OrderID {order_id_saved} Product 27")
+                    try: await context.bot.send_message(uid, f"✅ CLOSED! {close_reason}\nPrice {cur_p:.1f} OrderID {order_id_saved} Product 27\nAuto Alert Resume ✅")
                     except: pass
                     BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None)
                 else:
@@ -317,7 +328,7 @@ async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V119.3 PRO MANUAL + AUTO 70% FIXED\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}%\nAuto Alert: ON 70%+ ku auto msg varum!\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V119.5 SL TRAIL + NO ALERT LIVE\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% Trail from Best TP: {TP}% Trail: {TRAIL_TP}%\nLive la Alert OFF, Close ayiducha Alert ON ✅\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
@@ -337,7 +348,7 @@ async def trend_cmd(u,c):
         else: final=f"⚖️ SIDEWAYS - WAIT {long_pct}%/{short_pct}%"
         def icon(sig): return "🟢" if "BULL" in sig else "🔴" if "BEAR" in sig else "⚪"
         def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
-        txt=f"""📊 TREND V119.3 PRO FIXED
+        txt=f"""📊 TREND V119.5 PRO FIXED
 BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
 
 5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
@@ -354,8 +365,7 @@ BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
 FINAL: {final}
 LONG {long_pct}% | SHORT {short_pct}%
 OrderID: {order_id}
-💡 70%+ vantha Auto Alert Varum! Manual Only /long /short
-SL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY
+SL {SL}% Trail TP {TP}% Trail {TRAIL_TP}%
 """
         await u.message.reply_text(txt)
     except Exception as ex:
@@ -379,7 +389,7 @@ async def ask_perm(u, side):
         return
     lots=USER_QTY.get(u.effective_user.id,1); e=price()
     kb=[[InlineKeyboardButton("✅ YES", callback_data=f"{side}_yes"), InlineKeyboardButton("❌ NO", callback_data="no")]]
-    await u.message.reply_text(f"{side.upper()}? Qty {lots} Lot ({lots*0.001} BTC) Price {e} SL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY!", reply_markup=InlineKeyboardMarkup(kb))
+    await u.message.reply_text(f"{side.upper()}? Qty {lots} Lot ({lots*0.001} BTC) Price {e} SL {SL}% Trail TP {TP}% Trail {TRAIL_TP}% BOT ONLY!", reply_markup=InlineKeyboardMarkup(kb))
 
 async def short_cmd(u,c): await ask_perm(u,"short")
 async def long_cmd(u,c): await ask_perm(u,"long")
@@ -407,7 +417,7 @@ async def button(u,c):
         ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_SL[q.from_user.id]=round(e*(1+SL/100),1) if side=="sell" else round(e*(1-SL/100),1)
         LAST_TP[q.from_user.id]=round(e*(1-TP/100),1) if side=="sell" else round(e*(1+TP/100),1)
         LAST_POS_SIZE[q.from_user.id]= -lots if side=="sell" else lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False
-        await q.edit_message_text(f"{side.upper()} DONE ✅ BOT TRAILING ONLY!\nEntry {e} SL {SL}% TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nBest tracking start {e}\nProduct 27 HEAD FIX OK")
+        await q.edit_message_text(f"{side.upper()} DONE ✅ SL TRAIL START!\nEntry {e} SL {SL}% Trail TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nBest tracking start {e}\nNo Alert While LIVE ✅")
     except Exception as e:
         print(f"button error {e}")
 
@@ -420,13 +430,13 @@ async def close_cmd(u,c):
         sz,_,_=get_real_position()
         await u.message.reply_text(f"📊 REAL Delta: {sz} BTC Remember OrderID: {saved_id}")
         if abs(sz)<0.0000001:
-            await u.message.reply_text(f"✅ Already Closed! OrderID {saved_id} Already Closed!")
+            await u.message.reply_text(f"✅ Already Closed! OrderID {saved_id} Already Closed! Alert Resume ✅")
             BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None)
             IS_CLOSING[uid]=False; cancel_all_orders(); return
         lots = size_to_lots(sz); side="buy" if sz<0 else "sell"
         order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
         await asyncio.sleep(3); cancel_all_orders()
-        await u.message.reply_text(f"✅ CLOSED! Remember OrderID {saved_id} {sz} BTC Closed at {price():.1f} ✅")
+        await u.message.reply_text(f"✅ CLOSED! Remember OrderID {saved_id} {sz} BTC Closed at {price():.1f} ✅ Alert Resume!")
         BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); IS_CLOSING[uid]=False
     except Exception as e:
         await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}"); IS_CLOSING[u.effective_user.id]=False
@@ -438,6 +448,6 @@ def main():
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
     app.job_queue.run_repeating(auto_alert_job, interval=120, first=30)
-    print("BOT LIVE V119.3 PRO MANUAL + AUTO 70% FIXED"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V119.5 SL TRAIL + NO ALERT WHEN LIVE"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
