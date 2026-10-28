@@ -13,12 +13,8 @@ TP=2.0
 TRAIL_TP=0.6
 BE_PROFIT_DOLLAR=25
 PARTIAL_BOOK_PCT=70
-
-# === USER SETTINGS - NAA THODAVE MAATEN - LOCKED ===
 USER_QTY={}
 USER_LEV={}
-# ===================================================
-
 ALERT_USERS=set()
 BEST_PRICE={}; ENTRY_PRICE={}; LAST_POS_SIZE={}
 LAST_SL={}; LAST_TP={}; ENTRY_TIME={}
@@ -32,7 +28,7 @@ class HealthHandler(BaseHTTPRequestHandler):
   self.send_response(200)
   self.send_header('Content-type','text/plain')
   self.end_headers()
-  self.wfile.write(b'BOT OK V123 PRO SCALPER CLOSED CANDLE')
+  self.wfile.write(b'BOT OK V125 CLOSED FIX')
  def do_HEAD(self):
   self.send_response(200)
   self.send_header('Content-type','text/plain')
@@ -112,7 +108,6 @@ def get_latest_order_id_from_api():
  except: return None
 def size_to_lots(real_size): return int(abs(real_size)*1000) if abs(real_size)<1 else int(abs(real_size))
 
-# === V123 PRO SCALPER - CLOSED CANDLE ONLY - LIVE INJECTION REMOVED ===
 def fetch_candles_full(res="5m", count=100):
  closes=[]; highs=[]; lows=[]; vols=[]; opens=[]
  try:
@@ -129,12 +124,8 @@ def fetch_candles_full(res="5m", count=100):
     r=requests.get(url, params=params, timeout=8).json(); candles=r if isinstance(r,list) else r.get('result',[])
     if len(candles)>20: closes=[float(c.get('close',0)) for c in candles if float(c.get('close',0))>0]; highs=[float(c.get('high',0)) for c in candles if float(c.get('high',0))>0]; lows=[float(c.get('low',0)) for c in candles if float(c.get('low',0))>0]; vols=[float(c.get('volume',0)) for c in candles]; opens=[float(c.get('open',0)) for c in candles if float(c.get('open',0))>0]
    except: pass
-  # FIXED: REMOVED LIVE PRICE INJECTION - PRO SCALPER CLOSED ONLY!
-  # if closes and abs(closes[-1]-cur_live)/cur_live>0.008: closes[-1]=cur_live...
-  # CLOSED CANDLE = CONFIRMED, NO FAKE WICK!
   return closes[-count:], highs[-count:], lows[-count:], vols[-count:], opens[-count:]
  except: return [],[],[],[],[]
-# === V123 PRO SCALPER - CLOSED CANDLE LOGIC ===
 def calc_atr(highs,lows,closes,period=14):
  try:
   trs=[]
@@ -159,8 +150,8 @@ def calc_cvd_and_liquidity():
   for i in range(-5,0): body=closes[i]-opens[i]; deltas.append(body*vols[i] if i < len(vols) else 0)
   cvd_sum=sum(deltas); last_body=abs(closes[-1]-opens[-1]); last_wick_up=highs[-1]-max(closes[-1],opens[-1]); last_wick_down=min(closes[-1],opens[-1])-lows[-1]; sweep="NO SWEEP"
   if last_body>0:
-   if last_wick_up > last_body*2.5: sweep="BEAR SWEEP - Fake Pump ❌"
-   elif last_wick_down > last_body*2.5: sweep="BULL SWEEP - Fake Dump ❌"
+   if last_wick_up > last_body*2.5: sweep="BEAR SWEEP"
+   elif last_wick_down > last_body*2.5: sweep="BULL SWEEP"
   cvd_status="BULLISH" if cvd_sum>0 else "BEARISH" if cvd_sum<0 else "NEUTRAL"; return cvd_status, sweep, cvd_sum
  except: return "NEUTRAL","NO SWEEP",0
 def calc_supertrend(closes,highs,lows,period=10,mult=3):
@@ -172,13 +163,11 @@ def calc_supertrend(closes,highs,lows,period=10,mult=3):
   elif closes[-1]<lower: return "RED BEARISH", upper
   else: return ("GREEN BULLISH", lower) if closes[-1]>closes[-2] else ("RED BEARISH", upper)
  except: return "SIDE",0
-
 def get_pro_signal(res_label):
  closes,highs,lows,vols,opens=fetch_candles_full(res_label,100)
  if len(closes)<25: return {"st":"SIDE","st_val":0,"price":price(),"atr":100,"vwap":price(),"vol_pct":100}
  st_trend,st_val=calc_supertrend(closes,highs,lows,10,3); atr=calc_atr(highs,lows,closes,14); vwap=calc_vwap(closes,vols); vol_pct=calc_vol_pct(vols); cur=closes[-1]
  return {"st":st_trend,"st_val":st_val,"price":cur,"atr":atr,"vwap":vwap,"vol_pct":vol_pct}
-
 def calc_score(s5,s15,s60, cvd_status, sweep):
  long_score=0; short_score=0
  if "GREEN" in s5['st']: long_score+=25
@@ -199,20 +188,16 @@ def calc_score(s5,s15,s60, cvd_status, sweep):
  if total==0: return 50,50
  long_pct=int(long_score/total*100)
  return long_pct, 100-long_pct
+
 async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
  global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
  try:
   live_sz,_,_=get_real_position()
   if abs(live_sz)>0.0000001: return
   if time.time()-LAST_ALERT_TIME<180: return
-  # PRO LOGIC: Only check near 5m close - 00,05,10,15... + 30 sec
-  # This ensures candle CLOSED confirm!
-  import datetime
-  now=datetime.datetime.now()
-  # Allow every minute but signal is from CLOSED candle - safe!
   s5=get_pro_signal("5m"); s15=get_pro_signal("15m"); s60=get_pro_signal("1h")
   ticker=get_ticker_info()
-  cvd_status, sweep, cvd_sum = calc_cvd_and_liquidity()
+  cvd_status, sweep, _ = calc_cvd_and_liquidity()
   long_pct, short_pct=calc_score(s5,s15,s60,cvd_status,sweep)
   cur=price(); display_long=long_pct; display_short=short_pct; tag="🟢 BOOM CLOSED ✅"
   if long_pct>=70 and cvd_status=="BEARISH": display_long=60; tag="🟡 WEAK - CVD BEARISH ❌ SKIP"
@@ -221,15 +206,15 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
   if "BULL SWEEP" in sweep and short_pct>=70: display_short=55; tag=f"🟡 WEAK - {sweep} SKIP"
   vwap_status="ABOVE ✅" if cur>s5['vwap'] else "BELOW ❌"
   vol_str=f"{s5['vol_pct']}% {'🔥' if s5['vol_pct']>120 else '✅' if s5['vol_pct']>80 else '⚠️'}"
-  signal=""; kb=None
+  signal=""; kb=None; msg=""
   if display_long>=70:
    signal=f"LONG_{display_long}"
-   msg=f"{tag} - LONG {display_long}%\n\nBTC: ${cur:.1f} | CLOSED Candle ✅\nClosed Price: ${s5['price']:.1f} | ST ✅\nVol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['st']} 15M {s15['st']} 1H {s60['st']}\n\nQTY: YOUR SETTING | Lev: YOUR SETTING\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: +2%\n\nTake LONG? Candle Close Confirm! 👇"
+   msg=f"{tag} - LONG {display_long}%\n\nBTC Live: ${cur:.1f} | Closed: ${s5['price']:.1f} ✅\nVol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['st']} 15M {s15['st']} 1H {s60['st']}\n\nQTY: YOUR SETTING | Lev: YOUR SETTING\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: +2%\n\nTake LONG? CLOSED Confirm! 👇"
    kb=[[InlineKeyboardButton("✅ YES LONG", callback_data=f"confirm_long_{display_long}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
   elif display_short>=70:
-   signal=f"SHORT_{display_short}%\n\nBTC: ${cur:.1f} | CLOSED Candle ✅\nClosed Price: ${s5['price']:.1f} | ST ✅\nVol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['st']} 15M {s15['st']} 1H {s60['st']}\n\nQTY: YOUR SETTING | Lev: YOUR SETTING\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: -2%\n\nTake SHORT? Candle Close Confirm! 👇"
+   signal=f"SHORT_{display_short}"
+   msg=f"{tag} - SHORT {display_short}%\n\nBTC Live: ${cur:.1f} | Closed: ${s5['price']:.1f} ✅\nVol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['st']} 15M {s15['st']} 1H {s60['st']}\n\nQTY: YOUR SETTING | Lev: YOUR SETTING\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: -2%\n\nTake SHORT? CLOSED Confirm! 👇"
    kb=[[InlineKeyboardButton("✅ YES SHORT", callback_data=f"confirm_short_{display_short}"), InlineKeyboardButton("❌ NO SKIP", callback_data="confirm_no")]]
-   msg=f"{tag} - SHORT {display_short}%\n\nBTC: ${cur:.1f} | CLOSED Candle ✅\nClosed Price: ${s5['price']:.1f} | ST ✅\nVol: {vol_str}\nCVD: {cvd_status} | {sweep}\nVWAP: {vwap_status} ({s5['vwap']:.1f}) | ATR: {s5['atr']:.1f}\nOI: {ticker['oi']:.0f} | 5M {s5['st']} 15M {s15['st']} 1H {s60['st']}\n\nQTY: YOUR SETTING | Lev: YOUR SETTING\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP: -2%\n\nTake SHORT? Candle Close Confirm! 👇"
   if signal and signal!=LAST_ALERT_SIGNAL and "BOOM" in tag:
    all_users=ALERT_USERS.union(set(USER_QTY.keys()))
    for uid in list(all_users):
@@ -258,79 +243,69 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
     f=get_latest_order_id_from_api()
     if f: order_id_saved=f; LAST_ORDER_ID[uid]=f
    liq_safe_pct=((cur_p-liq_real)/cur_p*100) if liq_real!=0 and cur_size>0 else ((liq_real-cur_p)/cur_p*100) if liq_real!=0 else 0
-   is_trailing=TRAILING_ACTIVE.get(uid, False); last_best_alert=LAST_BEST_ALERT.get(uid, entry); should_alert_trail=False
-   be_done=BE_DONE.get(uid, False); pnl_dollar_calc=(cur_p-entry)*abs(cur_size) if cur_size>0 else (entry-cur_p)*abs(cur_size)
+   be_done=BE_DONE.get(uid, False); last_best_alert=LAST_BEST_ALERT.get(uid, entry); should_alert_trail=False
+   if cur_size>0: pnl_dollar_calc=(cur_p-entry)*abs(cur_size)
+   else: pnl_dollar_calc=(entry-cur_p)*abs(cur_size)
    if not be_done and pnl_dollar_calc >= BE_PROFIT_DOLLAR:
     BE_DONE[uid]=True
-    try: await context.bot.send_message(uid, f"🛡️ BE ACTIVATED! LOSS $0\n\nEntry: {entry:.1f} | Now: {cur_p:.1f}\nProfit: +${pnl_dollar_calc:.2f} >= ${BE_PROFIT_DOLLAR}\nSL -> {entry:.1f} (ENTRY) 🔒\n\nIppo enna nadanthalum LOSS illa! $0 Safe!")
+    try: await context.bot.send_message(uid, f"🛡️ BE ACTIVATED! LOSS $0\n\nEntry: {entry:.1f} | Now: {cur_p:.1f}\nProfit: +${pnl_dollar_calc:.2f} >= ${BE_PROFIT_DOLLAR}\nSL -> {entry:.1f} (ENTRY) 🔒")
     except: pass
    partial_done=PARTIAL_DONE.get(uid, False)
    if not partial_done and cur_size>0 and cur_p >= entry*(1+TP*0.7/100):
     PARTIAL_DONE[uid]=True; lots_total=size_to_lots(cur_size); lots_book=int(lots_total*0.7)
-    if lots_book>=1:
-     order({"product_id":27,"size":lots_book,"side":"sell","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
-     try: await context.bot.send_message(uid, f"💰 70% BOOKED! Profit Locked!\n\nEntry {entry:.1f} -> {cur_p:.1f}\nBooked {lots_book} Lots ({PARTIAL_BOOK_PCT}%)\nBalance Safe! Remaining 30% BE la irukku!")
-     except: pass
+    if lots_book>=1: order({"product_id":27,"size":lots_book,"side":"sell","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
    elif not partial_done and cur_size<0 and cur_p <= entry*(1-TP*0.7/100):
     PARTIAL_DONE[uid]=True; lots_total=size_to_lots(cur_size); lots_book=int(lots_total*0.7)
-    if lots_book>=1:
-     order({"product_id":27,"size":lots_book,"side":"buy","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
-     try: await context.bot.send_message(uid, f"💰 70% BOOKED! Profit Locked!\n\nEntry {entry:.1f} -> {cur_p:.1f}\nBooked {lots_book} Lots ({PARTIAL_BOOK_PCT}%)\nRemaining 30% BE la!")
-     except: pass
+    if lots_book>=1: order({"product_id":27,"size":lots_book,"side":"buy","order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
    if cur_size>0:
     if cur_p>best:
      BEST_PRICE[uid]=cur_p; best=cur_p
      if abs(best-last_best_alert)>=10: should_alert_trail=True; LAST_BEST_ALERT[uid]=best
-     sl_now=best-(atr_live*1.5)
-     if be_done: sl_now=entry
      if should_alert_trail:
       try:
        pnl_dollar=(cur_p-entry)*abs(cur_size)
-       await context.bot.send_message(uid, f"🔒 LONG UPDATE\n\nBest: {best:.1f} (+{(best-entry):.1f}$)\nSL: {sl_now:.1f} {'🛡️ BE $0 LOSS' if be_done else '🔼 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\n\nVWAP: {vwap_live:.1f} | Vol: {vol_live}% | ATR {atr_live:.1f}\nOrderID: {order_id_saved}")
+       await context.bot.send_message(uid, f"🔒 LONG UPDATE\n\nBest: {best:.1f} (+{(best-entry):.1f}$)\nSL: {entry if be_done else best-(atr_live*1.5):.1f} {'🛡️ BE' if be_done else '🔼 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\nOrderID: {order_id_saved}")
       except: pass
    else:
     if cur_p<best:
      BEST_PRICE[uid]=cur_p; best=cur_p
      if abs(best-last_best_alert)>=10: should_alert_trail=True; LAST_BEST_ALERT[uid]=best
-     sl_now=best+(atr_live*1.5)
-     if be_done: sl_now=entry
      if should_alert_trail:
       try:
        pnl_dollar=(entry-cur_p)*abs(cur_size)
-       await context.bot.send_message(uid, f"🔒 SHORT UPDATE\n\nBest: {best:.1f} (+{(entry-best):.1f}$)\nSL: {sl_now:.1f} {'🛡️ BE $0 LOSS' if be_done else '🔽 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\nVWAP: {vwap_live:.1f} | Vol: {vol_live}%\nATR SL: {sl_now:.1f}\nOrderID: {order_id_saved}")
+       await context.bot.send_message(uid, f"🔒 SHORT UPDATE\n\nBest: {best:.1f} (+{(entry-best):.1f}$)\nSL: {entry if be_done else best+(atr_live*1.5):.1f} {'🛡️ BE' if be_done else '🔽 LOCK'}\nEntry: {entry:.1f} | PnL: +${pnl_dollar:.2f} UPNL ${upnl_real:.2f}\nLiq: {liq_real:.0f} ({liq_safe_pct:.2f}% Safe ✅)\nOrderID: {order_id_saved}")
       except: pass
    close_reason=None; side_to_close=None
    if cur_size>0:
     sl_price=entry if be_done else best-(atr_live*1.5); tp_price=entry*(1+TP/100)
-    if cur_p<=sl_price: close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f} OrderID {order_id_saved} UPNL ${upnl_real:.2f}"; side_to_close="sell"
+    if cur_p<=sl_price: close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f}"; side_to_close="sell"
     elif cur_p>=tp_price:
-     if not is_trailing:
+     if not TRAILING_ACTIVE.get(uid, False):
       TRAILING_ACTIVE[uid]=True
-      try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} UPNL ${upnl_real:.2f} OrderID {order_id_saved}\nATR {atr_live:.1f} | {TRAIL_TP}% reverse la close!")
+      try: await context.bot.send_message(uid, f"🎯 TP HIT LONG! Best {best:.1f} Entry {entry:.1f}")
       except: pass
-     trail_close_price=best*(1-TRAIL_TP/100)
-     if cur_p<=trail_close_price: close_reason=f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved} Profit ${upnl_real:.2f}"; side_to_close="sell"
+     if cur_p<=best*(1-TRAIL_TP/100): close_reason=f"TP TRAIL Best {best:.1f} -> {cur_p:.1f}"; side_to_close="sell"
    else:
     sl_price=entry if be_done else best+(atr_live*1.5); tp_price=entry*(1-TP/100)
-    if cur_p>=sl_price: close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} >= {cur_p:.1f} OrderID {order_id_saved}"; side_to_close="buy"
+    if cur_p>=sl_price: close_reason=f"{'BE $0' if be_done else 'SL ATR'} Best {best:.1f} SL {sl_price:.1f} >= {cur_p:.1f}"; side_to_close="buy"
     elif cur_p<=tp_price:
-     if not is_trailing:
+     if not TRAILING_ACTIVE.get(uid, False):
       TRAILING_ACTIVE[uid]=True
-      try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} UPNL ${upnl_real:.2f} OrderID {order_id_saved}\nATR {atr_live:.1f} | {TRAIL_TP}% reverse la close!")
+      try: await context.bot.send_message(uid, f"🎯 TP HIT SHORT! Best {best:.1f} Entry {entry:.1f}")
       except: pass
-     trail_close_price=best*(1+TRAIL_TP/100)
-     if cur_p>=trail_close_price: close_reason=f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"; side_to_close="buy"
+     if cur_p>=best*(1+TRAIL_TP/100): close_reason=f"TP TRAIL Best {best:.1f} -> {cur_p:.1f}"; side_to_close="buy"
    if close_reason and side_to_close:
     lots=size_to_lots(cur_size)
     if lots<1: lots=1
     order({"product_id":27,"size":lots,"side":side_to_close,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
     await asyncio.sleep(2); sz_check,_,_,_,_=get_real_position_full()
     if abs(sz_check)<0.0000001:
-     profit_dollar=(cur_p-entry)*cur_size if cur_size>0 else (entry-cur_p)*abs(cur_size); profit_pct=((cur_p-entry)/entry*100) if cur_size>0 else ((entry-cur_p)/entry*100); duration=""
-     if ENTRY_TIME.get(uid): duration=f"{int((time.time()-ENTRY_TIME.get(uid,0))/60)}m"
+     if cur_size>0: profit_dollar=(cur_p-entry)*abs(cur_size); profit_pct=(cur_p-entry)/entry*100; side_name="LONG"
+     else: profit_dollar=(entry-cur_p)*abs(cur_size); profit_pct=(entry-cur_p)/entry*100; side_name="SHORT"
+     duration=f"{int((time.time()-ENTRY_TIME.get(uid,0))/60)}m" if ENTRY_TIME.get(uid) else "0m"
      try:
-      if be_done and profit_dollar>=0: await context.bot.send_message(uid, f"✅ BE SAFE CLOSE! NO LOSS!\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: {profit_dollar:+.1f}$ ({profit_pct:+.2f}%)\nDuration: {duration} | Best: {best:.1f}\n\nReason: {close_reason.split('OrderID')[0]}\nBE Protected ✅ LOSS $0\nBal: ${get_balance():.2f}\nOrderID: {order_id_saved}")
-      else: await context.bot.send_message(uid, f"✅ LONG CLOSED - PROFIT!\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: {profit_dollar:+.1f}$ ({profit_pct:+.2f}%) = ${profit_dollar:.2f}\nDuration: {duration} | Best: {best:.1f}\n\nReason: {close_reason.split('OrderID')[0]}\nVWAP Exit: {'Above ✅' if cur_p>vwap_live else 'Below'} | Vol: {vol_live}%\nBal: ${get_balance():.2f} | Next Signal Wait...\nOrderID: {order_id_saved}")
+      if profit_dollar>=0: await context.bot.send_message(uid, f"✅ {side_name} CLOSED - PROFIT! 💰\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nProfit: +${profit_dollar:.2f} ({profit_pct:+.2f}%)\nDuration: {duration} | Best: {best:.1f}\nReason: {close_reason}\nBal: ${get_balance():.2f}\nOrderID: {order_id_saved}")
+      else: await context.bot.send_message(uid, f"❌ {side_name} CLOSED - LOSS! 📉\n\nEntry: {entry:.1f} | Exit: {cur_p:.1f}\nLoss: ${profit_dollar:.2f} ({profit_pct:+.2f}%)\nDuration: {duration} | Best: {best:.1f}\nReason: {close_reason}\nBal: ${get_balance():.2f}\nOrderID: {order_id_saved}")
      except: pass
      BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); LAST_BEST_ALERT.pop(uid,None); BE_DONE.pop(uid,None); PARTIAL_DONE.pop(uid,None)
   for uid in all_uids:
@@ -346,7 +321,7 @@ async def start(u,c):
   else: order_id="Fetching..."
  if not order_id: order_id="None"
  liq_safe=((cur-liq)/cur*100) if liq!=0 and sz>0 else ((liq-cur)/cur*100) if liq!=0 else 0
- txt=f"🤖 BOT V123 PRO SCALPER CLOSED ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x (YOUR SETTING)\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nMargin: ${margin:.2f} | OrderID: {order_id}\nLOGIC: CLOSED CANDLE + ST+CVD+SWEEP+VWAP+VOL\nMANUAL YES/NO ✅ | PRO SCALPER\n/cmds: /qty /lev /trend /long /short /close"
+ txt=f"🤖 BOT V125 CLOSED FIX ✅\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nLiq: {liq:.0f} ({liq_safe:.2f}% Safe ✅)\nOrderID: {order_id}\nLOGIC: CLOSED CANDLE + ST+CVD+SWEEP\nBUG FIXED: SHORT/LONG ✅\n/cmds: /qty /lev /trend /long /short /close"
  await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
@@ -356,49 +331,40 @@ async def trend_cmd(u,c):
   if not order_id and abs(sz)>0.0000001:
    fetched=get_latest_order_id_from_api()
    if fetched: order_id=fetched; LAST_ORDER_ID[uid]=fetched
-   else: order_id="Fetching..."
-  if not order_id or "LIVE-" in str(order_id):
-   fetched=get_latest_order_id_from_api()
-   if fetched: order_id=fetched; LAST_ORDER_ID[uid]=fetched
   if not order_id: order_id="None"
-  await u.message.reply_text("📊 Loading V123 PRO SCALPER... CLOSED Candle...")
+  await u.message.reply_text("📊 Loading V125 CLOSED...")
   s5=get_pro_signal("5m"); s15=get_pro_signal("15m"); s60=get_pro_signal("1h"); long_pct, short_pct=calc_score(s5,s15,s60,cvd_status,sweep)
   final_tag="🟢 BOOM CLOSED ✅" if long_pct>=70 or short_pct>=70 else "⚖️ WAIT"
   if long_pct>=70 and cvd_status=="BEARISH": final_tag="🟡 WEAK - CVD BEARISH SKIP"; long_pct=60
   if short_pct>=70 and cvd_status=="BULLISH": final_tag="🟡 WEAK - CVD BULLISH SKIP"; short_pct=60
-  if long_pct>=70: final=f"🚀 STRONG BULLISH - LONG {long_pct}% {final_tag}"
-  elif short_pct>=70: final=f"📉 STRONG BEARISH - SHORT {short_pct}% {final_tag}"
-  elif long_pct>=55: final=f"🟢 BULLISH - LONG Fav {long_pct}%"
-  elif short_pct>=55: final=f"🔴 BEARISH - SHORT Fav {short_pct}%"
-  else: final=f"⚖️ SIDEWAYS - WAIT {long_pct}%/{short_pct}%"
+  if long_pct>=70: final=f"🚀 LONG {long_pct}% {final_tag}"
+  elif short_pct>=70: final=f"📉 SHORT {short_pct}% {final_tag}"
+  elif long_pct>=55: final=f"🟢 LONG Fav {long_pct}%"
+  elif short_pct>=55: final=f"🔴 SHORT Fav {short_pct}%"
+  else: final=f"⚖️ WAIT {long_pct}%/{short_pct}%"
   def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
   liq_safe=((e-liq_real)/e*100) if liq_real!=0 and sz>0 else ((liq_real-e)/e*100) if liq_real!=0 else 0
   vwap_status="ABOVE ✅" if e>s5['vwap'] else "BELOW ❌"
-  txt=f"""📊 TREND V123 PRO SCALPER CLOSED
-BTC Live: {e:.1f} | Closed: {s5['price']:.1f} Bal: ${bal:.2f} 
+  txt=f"""📊 TREND V125 CLOSED FIXED
+BTC Live: {e:.1f} Closed: {s5['price']:.1f} Bal: ${bal:.2f} 
 POS: {sz} UPNL ${upnl_real:.2f} Entry {entry_real:.1f}
-Liq: {liq_real:.0f} ({liq_safe:.2f}% Safe) Margin ${margin_real:.2f}
-CVD: {cvd_status} | LIQ: {sweep}
-5M CLOSED: ST {st_icon(s5['st'])} {s5['st']} | VWAP {s5['vwap']:.1f} {vwap_status} | Vol {s5['vol_pct']}% | ATR {s5['atr']:.1f} | Price {s5['price']:.1f}
-15M: ST {st_icon(s15['st'])} {s15['st']}
-1H: ST {st_icon(s60['st'])} {s60['st']}
+Liq: {liq_real:.0f} ({liq_safe:.2f}% Safe)
+CVD: {cvd_status} | {sweep}
+5M CLOSED: {st_icon(s5['st'])} {s5['st']} VWAP {s5['vwap']:.1f} {vwap_status} Vol {s5['vol_pct']}% ATR {s5['atr']:.1f}
+15M: {st_icon(s15['st'])} {s15['st']} | 1H: {st_icon(s60['st'])} {s60['st']}
 OI: {ticker['oi']:.0f}
 FINAL: {final}
-LONG {long_pct}% | SHORT {short_pct}%
 OrderID: {order_id}
-LOGIC: CLOSED Candle ST+CVD+SWEEP+VWAP+Vol ✅
-BE: ${BE_PROFIT_DOLLAR} | 70% BOOK LIVE ✅ | MANUAL
 """
   await u.message.reply_text(txt)
  except Exception as ex: await u.message.reply_text(f"Trend error {ex}")
 
 async def qty_cmd(u,c):
  ALERT_USERS.add(u.effective_user.id)
- try: lots=int(float(c.args[0])) if c.args else 1; USER_QTY[u.effective_user.id]=lots; await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC - YOUR SETTING LOCKED")
+ try: lots=int(float(c.args[0])) if c.args else 1; USER_QTY[u.effective_user.id]=lots; await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC - LOCKED")
  except: await u.message.reply_text(f"Use /qty 1 to 4")
-
 async def lev_cmd(u,c):
- ALERT_USERS.add(u.effective_user.id); l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l); await u.message.reply_text(f"✅ Lev {l}x - YOUR SETTING LOCKED")
+ ALERT_USERS.add(u.effective_user.id); l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l); await u.message.reply_text(f"✅ Lev {l}x - LOCKED")
 
 async def ask_perm(u, side):
  ALERT_USERS.add(u.effective_user.id); sz,entry,upnl,liq,margin=get_real_position_full()
@@ -409,7 +375,7 @@ async def ask_perm(u, side):
   await u.message.reply_text(f"❌ Already have position {sz} BTC Entry {entry} UPNL ${upnl:.2f} Liq {liq:.0f} ({liq_safe:.2f}% Safe) OrderID {oid}\nClose first with /close Anna!"); return
  lots=USER_QTY.get(u.effective_user.id,1); e=price(); s5=get_pro_signal("5m"); vwap_status="ABOVE ✅" if e>s5['vwap'] else "BELOW ❌"; cvd_status, sweep, _ = calc_cvd_and_liquidity()
  kb=[[InlineKeyboardButton("✅ YES", callback_data=f"{side}_yes"), InlineKeyboardButton("❌ NO", callback_data="no")]]
- await u.message.reply_text(f"🔥 CONFIRM {side.upper()}?\n\nQty {lots} Lot ({lots*0.001} BTC) Live {e:.1f} Closed {s5['price']:.1f}\nVWAP: {s5['vwap']:.1f} {vwap_status} | Vol: {s5['vol_pct']}% | ATR: {s5['atr']:.1f}\nCVD: {cvd_status} | {sweep}\nCLOSED CANDLE ✅ PRO SCALPER\nSL: BE @ +${BE_PROFIT_DOLLAR} LOSS $0 | TP {TP}% Trail {TRAIL_TP}%\nLiq Safe ✅", reply_markup=InlineKeyboardMarkup(kb))
+ await u.message.reply_text(f"🔥 CONFIRM {side.upper()}?\n\nQty {lots} Lot ({lots*0.001} BTC) Live {e:.1f} Closed {s5['price']:.1f}\nVWAP: {s5['vwap']:.1f} {vwap_status} | Vol: {s5['vol_pct']}% | ATR: {s5['atr']:.1f}\nCVD: {cvd_status} | {sweep}\nCLOSED CANDLE ✅\nSL: BE @ +${BE_PROFIT_DOLLAR} | TP {TP}%\n", reply_markup=InlineKeyboardMarkup(kb))
 
 async def short_cmd(u,c): await ask_perm(u,"short")
 async def long_cmd(u,c): await ask_perm(u,"long")
@@ -423,13 +389,11 @@ async def button(u,c):
    if abs(sz_check)>0.0000001: oid=LAST_ORDER_ID.get(q.from_user.id, "Unknown"); await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid}! Use /close first!"); return
    lots=USER_QTY.get(q.from_user.id,1); e=price(); side="buy" if is_long else "sell"; res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order"})
    if not res.get('success'): bal=get_balance(); await q.edit_message_text(f"❌ Failed! Bal ${bal:.2f} Error: {res}"); return
-   try:
-    order_id=res.get('result', {}).get('id', 0)
-    if not order_id: order_id=int(time.time())
-    LAST_ORDER_ID[q.from_user.id]=order_id
+   try: order_id=res.get('result', {}).get('id', 0); 
+    if not order_id: order_id=int(time.time()); LAST_ORDER_ID[q.from_user.id]=order_id
    except: LAST_ORDER_ID[q.from_user.id]=int(time.time())
    ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_BEST_ALERT[q.from_user.id]=e; LAST_POS_SIZE[q.from_user.id]=lots if is_long else -lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False; BE_DONE[q.from_user.id]=False; PARTIAL_DONE[q.from_user.id]=False
-   s5=get_pro_signal("5m"); await q.edit_message_text(f"✅ {side.upper()} CONFIRMED CLOSED CANDLE! V123 PRO\n\nEntry: {e:.1f} | Closed: {s5['price']:.1f} | OrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP: {s5['vwap']:.1f} | Vol: {s5['vol_pct']}% | ATR {s5['atr']*1.5:.1f}\nBE @ +${BE_PROFIT_DOLLAR} LOSS $0 | 70% AUTO BOOK ✅\nBest tracking start {e}"); CONFIRM_PENDING.pop(q.from_user.id,None); return
+   s5=get_pro_signal("5m"); await q.edit_message_text(f"✅ {side.upper()} CONFIRMED CLOSED! V125\n\nEntry: {e:.1f} Closed: {s5['price']:.1f} OrderID: {LAST_ORDER_ID[q.from_user.id]}\nBE @ +${BE_PROFIT_DOLLAR} | 70% BOOK ✅"); CONFIRM_PENDING.pop(q.from_user.id,None); return
   if data=="confirm_no": await q.edit_message_text("❌ Skipped! Next CLOSED candle wait..."); CONFIRM_PENDING.pop(q.from_user.id,None); return
   sz_check,_,_,_,_=get_real_position_full()
   if abs(sz_check)>0.0000001: oid=LAST_ORDER_ID.get(q.from_user.id, "Unknown"); await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid}! Use /close first!"); return
@@ -437,13 +401,11 @@ async def button(u,c):
   if q.data=="no": await q.edit_message_text("Cancelled ❌"); return
   side="sell" if q.data=="short_yes" else "buy"; res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order"})
   if not res.get('success'): bal=get_balance(); await q.edit_message_text(f"❌ Failed! Bal ${bal:.2f} Error: {res}"); return
-  try:
-   order_id=res.get('result', {}).get('id', 0)
-   if not order_id: order_id=int(time.time())
-   LAST_ORDER_ID[q.from_user.id]=order_id
+  try: order_id=res.get('result', {}).get('id', 0); 
+   if not order_id: order_id=int(time.time()); LAST_ORDER_ID[q.from_user.id]=order_id
   except: LAST_ORDER_ID[q.from_user.id]=int(time.time())
   ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_BEST_ALERT[q.from_user.id]=e; LAST_SL[q.from_user.id]=round(e*(1+SL/100),1) if side=="sell" else round(e*(1-SL/100),1); LAST_TP[q.from_user.id]=round(e*(1-TP/100),1) if side=="sell" else round(e*(1+TP/100),1); LAST_POS_SIZE[q.from_user.id]=-lots if side=="sell" else lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False; BE_DONE[q.from_user.id]=False; PARTIAL_DONE[q.from_user.id]=False
-  s5=get_pro_signal("5m"); await q.edit_message_text(f"{side.upper()} DONE ✅ V123 PRO CLOSED!\nEntry {e} Closed {s5['price']:.1f} ATR SL {s5['atr']*1.5:.1f} BE @ +${BE_PROFIT_DOLLAR} TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nVWAP {s5['vwap']:.1f} Vol {s5['vol_pct']}% 70% BOOK LIVE ✅\nBest tracking start {e}")
+  s5=get_pro_signal("5m"); await q.edit_message_text(f"{side.upper()} DONE ✅ V125 CLOSED!\nEntry {e} Closed {s5['price']:.1f} ATR SL {s5['atr']*1.5:.1f} BE @ +${BE_PROFIT_DOLLAR} TP {TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}")
  except Exception as e: print(f"button error {e}")
 
 async def close_cmd(u,c):
@@ -452,8 +414,8 @@ async def close_cmd(u,c):
  await u.message.reply_text(f"🔍 Searching REAL Delta...\nRemember OrderID: {saved_id}")
  try:
   sz,_,up,liq,margin=get_real_position_full(); await u.message.reply_text(f"📊 REAL Delta: {sz} BTC UPNL ${up:.2f} Liq {liq:.0f} Remember OrderID: {saved_id}")
-  if abs(sz)<0.0000001: await u.message.reply_text(f"✅ Already Closed! OrderID {saved_id} Already Closed! Alert Resume ✅"); BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); LAST_BEST_ALERT.pop(uid,None); BE_DONE.pop(uid,None); PARTIAL_DONE.pop(uid,None); IS_CLOSING[uid]=False; cancel_all_orders(); return
-  lots=size_to_lots(sz); side="buy" if sz<0 else "sell"; order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"}); await asyncio.sleep(3); cancel_all_orders(); await u.message.reply_text(f"✅ CLOSED! Remember OrderID {saved_id} {sz} BTC Closed at {price():.1f} UPNL ${up:.2f} ✅ Alert Resume!"); BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); LAST_BEST_ALERT.pop(uid,None); BE_DONE.pop(uid,None); PARTIAL_DONE.pop(uid,None); IS_CLOSING[uid]=False
+  if abs(sz)<0.0000001: await u.message.reply_text(f"✅ Already Closed! OrderID {saved_id} Already Closed!"); BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); LAST_BEST_ALERT.pop(uid,None); BE_DONE.pop(uid,None); PARTIAL_DONE.pop(uid,None); IS_CLOSING[uid]=False; cancel_all_orders(); return
+  lots=size_to_lots(sz); side="buy" if sz<0 else "sell"; order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"}); await asyncio.sleep(3); cancel_all_orders(); await u.message.reply_text(f"✅ CLOSED! OrderID {saved_id} {sz} BTC Closed at {price():.1f} UPNL ${up:.2f} ✅"); BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None); LAST_BEST_ALERT.pop(uid,None); BE_DONE.pop(uid,None); PARTIAL_DONE.pop(uid,None); IS_CLOSING[uid]=False
  except Exception as e: await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}"); IS_CLOSING[u.effective_user.id]=False
 
 def main():
@@ -463,7 +425,6 @@ def main():
  app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("qty", qty_cmd)); app.add_handler(CommandHandler("lev", lev_cmd)); app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd)); app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
  app.job_queue.run_repeating(check_positions_job, interval=10, first=10)
  app.job_queue.run_repeating(auto_alert_job, interval=60, first=30)
- print("BOT LIVE V123 PRO SCALPER CLOSED CANDLE - MANUAL")
+ print("BOT LIVE V125 CLOSED FIX - MANUAL")
  app.run_polling(drop_pending_updates=True, allowed_updates=["message","callback_query"])
-
 if __name__=="__main__": main()
