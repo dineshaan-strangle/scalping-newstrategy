@@ -10,7 +10,6 @@ B = "https://api.india.delta.exchange"
 BC = "https://cdn.india.deltaex.org"
 SL = 1.2
 TP = 2.0
-DATA_FILE = "user_data.json"
 
 USER_QTY = {}
 USER_LEV = {}
@@ -21,39 +20,10 @@ LAST_SL = {}
 LAST_TP = {}
 ENTRY_TIME = {}
 IS_CLOSING = {}
-LAST_ORDER_ID = {}
-
-# === V112 FILE SAVE/LOAD - RENDER SAFE! ===
-def load_data():
-    global USER_QTY, USER_LEV, LAST_ORDER_ID, ENTRY_PRICE, BEST_PRICE, LAST_SL, LAST_TP
-    try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r') as f:
-                d = json.load(f)
-                USER_QTY = {int(k): int(v) for k,v in d.get('qty', {}).items()}
-                USER_LEV = {int(k): int(v) for k,v in d.get('lev', {}).items()}
-                LAST_ORDER_ID = {int(k): v for k,v in d.get('oid', {}).items()}
-                ENTRY_PRICE = {int(k): float(v) for k,v in d.get('entry', {}).items()}
-                print(f"DATA LOADED QTY {USER_QTY} LEV {USER_LEV}")
-    except Exception as e:
-        print(f"Load error {e}")
-
-def save_data():
-    try:
-        with open(DATA_FILE, 'w') as f:
-            json.dump({
-                'qty': USER_QTY,
-                'lev': USER_LEV,
-                'oid': LAST_ORDER_ID,
-                'entry': ENTRY_PRICE
-            }, f)
-    except Exception as e:
-        print(f"Save error {e}")
-
-load_data()
+LAST_ORDER_ID = {}  # ORDER ID REMEMBER
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V112 FORCE CLOSE FIXED')
+    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V114 ORDER ID VISIBLE')
     def log_message(self, format, *args): return
 
 def run_health_server():
@@ -118,13 +88,9 @@ def get_real_position():
         return sz, entry, upnl
     except: return 0,0,0
 
-# V112 SIZE CONVERT - REAL FIX!
 def size_to_lots(real_size):
-    # real_size can be 0.002 BTC or 2 lots
-    if abs(real_size) < 1:  # 0.002 BTC
-        return int(abs(real_size)*1000)
-    else:  # 2 lots already
-        return int(abs(real_size))
+    if abs(real_size) < 1: return int(abs(real_size)*1000)
+    else: return int(abs(real_size))
 
 async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -133,11 +99,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
         cur_size, entry_real, _ = get_real_position()
         await asyncio.sleep(1)
         sz2, _, _ = get_real_position()
-        if abs(cur_size) > 0.0000001 and abs(sz2) < 0.0000001:
-            await asyncio.sleep(3)
-            cur_size, entry_real, _ = get_real_position()
-        else:
-            cur_size = sz2
+        cur_size = sz2
 
         all_uids = set(list(USER_QTY.keys()) + list(LAST_POS_SIZE.keys()) + list(ENTRY_PRICE.keys()) + list(LAST_ORDER_ID.keys()))
         
@@ -145,68 +107,37 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
             if IS_CLOSING.get(uid): continue
             last_size = LAST_POS_SIZE.get(uid, 0)
             entry = ENTRY_PRICE.get(uid, entry_real)
-            best = BEST_PRICE.get(uid, entry)
             sl_price = LAST_SL.get(uid)
-            order_id_saved = LAST_ORDER_ID.get(uid, 0)
+            order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
             
-            if cur_size != 0 and entry != 0:
-                is_long = cur_size > 0
-                if is_long:
-                    if cur_p > best: BEST_PRICE[uid] = cur_p; best = cur_p
-                    profit_pct = (cur_p - entry) / entry * 100 if entry else 0
-                    if profit_pct >= 0.5 and sl_price and float(sl_price) < entry:
-                        new_sl = round(entry * 1.001, 1)
-                        try:
-                            cancel_all_orders(); await asyncio.sleep(0.5)
-                            sz_lots = size_to_lots(cur_size)
-                            order({"product_id":27,"size":sz_lots,"side":"sell","order_type":"market_order","stop_order_type":"stop_loss_order","stop_price":str(new_sl),"reduce_only":True})
-                            tp = LAST_TP.get(uid)
-                            if tp: order({"product_id":27,"size":sz_lots,"side":"sell","order_type":"limit_order","limit_price":str(tp),"reduce_only":True})
-                            LAST_SL[uid] = new_sl
-                            try: await context.bot.send_message(uid, f"🔼 TRAILING SL: Breakeven {new_sl} (Order {order_id_saved} Profit {profit_pct:.2f}%)")
-                            except: pass
+            if cur_size != 0 and entry != 0 and sl_price:
+                force = False
+                if cur_size < 0 and cur_p >= float(sl_price): force = True
+                elif cur_size > 0 and cur_p <= float(sl_price): force = True
+                if force:
+                    side = "buy" if cur_size < 0 else "sell"
+                    lots = size_to_lots(cur_size)
+                    if lots < 1: lots = 1
+                    print(f"FORCE CLOSE OrderID {order_id_saved} Product 27 Size {lots}")
+                    order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
+                    await asyncio.sleep(3)
+                    sz_check,_,_=get_real_position()
+                    if abs(sz_check) < 0.0000001:
+                        try: await context.bot.send_message(uid, f"✅ SL HIT CLOSED! Price {cur_p} OrderID {order_id_saved} Product 27")
                         except: pass
-                else:
-                    if cur_p < best or best == entry: BEST_PRICE[uid] = cur_p; best = cur_p
-                    profit_pct = (entry - cur_p) / entry * 100 if entry else 0
-                    if profit_pct >= 0.5 and sl_price and float(sl_price) > entry:
-                        new_sl = round(entry * 0.999, 1)
-                        try:
-                            cancel_all_orders(); await asyncio.sleep(0.5)
-                            sz_lots = size_to_lots(cur_size)
-                            order({"product_id":27,"size":sz_lots,"side":"buy","order_type":"market_order","stop_order_type":"stop_loss_order","stop_price":str(new_sl),"reduce_only":True})
-                            tp = LAST_TP.get(uid)
-                            if tp: order({"product_id":27,"size":sz_lots,"side":"buy","order_type":"limit_order","limit_price":str(tp),"reduce_only":True})
-                            LAST_SL[uid] = new_sl
-                            try: await context.bot.send_message(uid, f"🔽 TRAILING SHORT: Breakeven {new_sl} (Order {order_id_saved} {profit_pct:.2f}%)")
-                            except: pass
-                        except: pass
-
-                if sl_price:
-                    force = False
-                    if cur_size < 0 and cur_p >= float(sl_price): force = True
-                    elif cur_size > 0 and cur_p <= float(sl_price): force = True
-                    if force:
-                        side = "buy" if cur_size < 0 else "sell"
-                        lots = size_to_lots(cur_size)
-                        if lots < 1: lots = 1
-                        order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
-                        await asyncio.sleep(3)
-                        sz_check,_,_=get_real_position()
-                        if abs(sz_check) < 0.0000001:
-                            try: await context.bot.send_message(uid, f"✅ SL HIT CLOSED! {cur_p} Order {order_id_saved}")
-                            except: pass
-                            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); save_data()
-                            continue
+                        BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
+                        print(f"SL CLOSED OrderID {order_id_saved} REMOVED FROM REMEMBER")
+                        continue
             
             if last_size != 0 and abs(cur_size) < 0.0000001:
                 await asyncio.sleep(3)
                 verify_size,_,_ = get_real_position()
                 if abs(verify_size) < 0.0000001:
                     cancel_all_orders()
-                    try: await context.bot.send_message(uid, f"🚨 POSITION CLOSED! {cur_p} ✅ Order {order_id_saved} Verified")
+                    try: await context.bot.send_message(uid, f"🚨 POSITION CLOSED! {cur_p} ✅ OrderID {order_id_saved} Product 27 Verified")
                     except: pass
-                    BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); save_data()
+                    print(f"POSITION CLOSED OrderID {order_id_saved} REMOVED")
+                    BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
                 else:
                     LAST_POS_SIZE[uid] = verify_size
 
@@ -219,8 +150,8 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
 async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
-    order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V112 FORCE CLOSE FIXED\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\n/cmds: /qty /lev /trend /long /short /close"
+    order_id = LAST_ORDER_ID.get(uid, "None - No Trade Yet")
+    txt=f"🤖 BOT V114 ORDER ID VISIBLE\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nRemember OrderID: {order_id} Product 27\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 def get_candles_detail(res="5"):
@@ -249,7 +180,7 @@ async def trend_cmd(u,c):
     greens=sum([1 for t in [t5,t15,t60] if "BULLISH" in t]); reds=sum([1 for t in [t5,t15,t60] if "BEARISH" in t])
     final="🚀 BULLISH - LONG" if greens>=2 else "📉 BEARISH - SHORT" if reds>=2 else "⚖️ SIDEWAYS"
     order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
-    txt=f"📊 TREND V112\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} OrderID: {order_id}"
+    txt=f"📊 TREND V114\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} Remember OrderID: {order_id} Product 27"
     await u.message.reply_text(txt)
 
 async def qty_cmd(u,c):
@@ -257,23 +188,23 @@ async def qty_cmd(u,c):
         lots=int(float(c.args[0])) if c.args else 1
         if lots<1: lots=1
         USER_QTY[u.effective_user.id]=lots
-        save_data()
-        await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC SAVED! Render restart aana kooda pogathu!")
+        await u.message.reply_text(f"✅ QTY {lots} Lot = {lots*0.001} BTC")
     except:
         await u.message.reply_text(f"Use /qty 1 to 4")
 
 async def lev_cmd(u,c):
-    l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l); save_data()
-    await u.message.reply_text(f"✅ Lev {l}x SAVED!")
+    l=int(c.args[0]) if c.args else 20; USER_LEV[u.effective_user.id]=l; set_lev(l)
+    await u.message.reply_text(f"✅ Lev {l}x")
 
 async def ask_perm(u, side):
     sz,entry,upnl=get_real_position()
     if abs(sz)>0.0000001:
-        await u.message.reply_text(f"❌ Already have position {sz} BTC Entry {entry} OrderID {LAST_ORDER_ID.get(u.effective_user.id)}\nClose first with /close Anna!")
+        oid = LAST_ORDER_ID.get(u.effective_user.id, "Unknown")
+        await u.message.reply_text(f"❌ Already have position {sz} BTC Entry {entry} Remember OrderID {oid} Product 27\nClose first with /close Anna!")
         return
     lots=USER_QTY.get(u.effective_user.id,1); e=price()
     kb=[[InlineKeyboardButton("✅ YES", callback_data=f"{side}_yes"), InlineKeyboardButton("❌ NO", callback_data="no")]]
-    await u.message.reply_text(f"{side.upper()}? Qty {lots} Lot ({lots*0.001} BTC) Price {e} SL {SL}% TP {TP}%", reply_markup=InlineKeyboardMarkup(kb))
+    await u.message.reply_text(f"{side.upper()}? Qty {lots} Lot ({lots*0.001} BTC) Price {e} SL {SL}% TP {TP}% Product 27", reply_markup=InlineKeyboardMarkup(kb))
 
 async def short_cmd(u,c): await ask_perm(u,"short")
 async def long_cmd(u,c): await ask_perm(u,"long")
@@ -283,7 +214,8 @@ async def button(u,c):
     try:
         sz_check,_,_=get_real_position()
         if abs(sz_check)>0.0000001:
-            await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {LAST_ORDER_ID.get(q.from_user.id)}! Use /close first!")
+            oid = LAST_ORDER_ID.get(q.from_user.id, "Unknown")
+            await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid} Product 27! Use /close first!")
             return
         lots=USER_QTY.get(q.from_user.id,1); e=price()
         if q.data=="no": await q.edit_message_text("Cancelled ❌"); return
@@ -298,22 +230,27 @@ async def button(u,c):
             err_str = str(res).lower()
             if 'insufficient_margin' in err_str or 'insufficient' in err_str:
                 bal=get_balance()
-                await q.edit_message_text(f"❌ Margin Pathala Anna! Qty {lots} Lot ku Balance pathala. Bal ${bal:.2f}\n/qty 3 ku maathi try pannunga!\nError: {res}")
+                await q.edit_message_text(f"❌ Margin Pathala Anna! Qty {lots} Lot ku Balance pathala. Bal ${bal:.2f}\n/qty 1 ku maathi try pannunga!\nError: {res}")
                 return
             else:
                 await q.edit_message_text(f"FAILED: {res}")
                 return
 
+        # === V114 ORDER ID RENDER LOG + BOT + REMEMBER - UNGA IDEA! ===
         try:
             order_id = res.get('result', {}).get('id', 0)
             if not order_id:
                 order_id = int(time.time())
             LAST_ORDER_ID[q.from_user.id] = order_id
-            print(f"ORDER ID SAVED: {order_id}")
-            save_data()
-        except:
+            # RENDER LOG LA VARUM!
+            print(f"========================================")
+            print(f"ORDER ID SAVED: {order_id} PRODUCT 27 SIZE {lots} SIDE {side}")
+            print(f"REMEMBER DICT: {LAST_ORDER_ID}")
+            print(f"========================================")
+        except Exception as ex:
+            print(f"ORDER ID SAVE ERROR {ex}")
             LAST_ORDER_ID[q.from_user.id] = int(time.time())
-            save_data()
+            print(f"ORDER ID FALLBACK SAVED: {LAST_ORDER_ID[q.from_user.id]}")
 
         try:
             if side=="sell":
@@ -327,8 +264,8 @@ async def button(u,c):
         ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_SL[q.from_user.id]=sl; LAST_TP[q.from_user.id]=tp
         LAST_POS_SIZE[q.from_user.id]= -lots if side=="sell" else lots
         ENTRY_TIME[q.from_user.id]=time.time()
-        save_data()
-        await q.edit_message_text(f"{side.upper()} DONE ✅ Entry {e} SL {sl} TP {tp} Qty {lots} Lot\nOrderID: {LAST_ORDER_ID[q.from_user.id]} saved!")
+        # BOT LA SHOW AGUM!
+        await q.edit_message_text(f"{side.upper()} DONE ✅\nEntry {e} SL {sl} TP {tp} Qty {lots} Lot\nOrderID: {LAST_ORDER_ID[q.from_user.id]} Remembered!\nProduct 27 Bot Trade")
 
     except Exception as e:
         print(f"button error {e}")
@@ -338,32 +275,19 @@ async def button(u,c):
 async def close_cmd(u,c):
     uid=u.effective_user.id
     IS_CLOSING[uid]=True
-    saved_id = LAST_ORDER_ID.get(uid, "No ID")
-    await u.message.reply_text(f"🔍 V112 FORCE CLOSE Product 27... Saved OrderID: {saved_id}")
+    saved_id = LAST_ORDER_ID.get(uid, "No ID - Remember Empty")
+    # RENDER LOG + BOT RENDUME ORDER ID!
+    print(f"========== CLOSE START OrderID {saved_id} Product 27 ==========")
+    await u.message.reply_text(f"🔍 Searching REAL Delta Product 27...\nRemember OrderID: {saved_id} Product 27")
     try:
-        sz=0
-        h=hdr("GET","/v2/positions")
-        pos=requests.get(B+"/v2/positions", headers=h, timeout=10).json()
-        for x in pos.get('result',[]):
-            if int(x.get('product_id',0))==27:
-                s=float(x.get('size',0))
-                if abs(s)>0.0000001: sz=s; break
+        sz,_,_=get_real_position()
+
+        await u.message.reply_text(f"📊 REAL Delta: {sz} BTC (Product 27) Remember OrderID: {saved_id}")
 
         if abs(sz)<0.0000001:
-            h2=hdr("GET","/v2/positions/margined","product_id=27","")
-            pos2=requests.get(B+"/v2/positions/margined?product_id=27", headers=h2, timeout=10).json()
-            res2=pos2.get('result')
-            items=[res2] if isinstance(res2, dict) else (res2 if isinstance(res2, list) else [])
-            for x in items:
-                if int(x.get('product_id',0))==27:
-                    s=float(x.get('size',0))
-                    if abs(s)>0.0000001: sz=s; break
-
-        await u.message.reply_text(f"📊 REAL Delta: {sz} BTC (Product 27) OrderID {saved_id}")
-
-        if abs(sz)<0.0000001:
-            await u.message.reply_text(f"✅ Already Positions (0) - Order {saved_id} Already Closed!")
-            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); save_data()
+            await u.message.reply_text(f"✅ Already Positions (0) - OrderID {saved_id} Product 27 Already Closed!")
+            print(f"CLOSE ALREADY 0 OrderID {saved_id} REMOVED")
+            BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
             IS_CLOSING[uid]=False
             cancel_all_orders()
             return
@@ -371,27 +295,34 @@ async def close_cmd(u,c):
         lots = size_to_lots(sz)
         if lots<1: lots=1
         side="buy" if sz<0 else "sell"
-        await u.message.reply_text(f"Found OrderID {saved_id}: {sz} BTC = {lots} lots, FORCE CLOSING {side} Product ID 27...")
+        await u.message.reply_text(f"Found Remember OrderID {saved_id}: {sz} BTC = {lots} lots, Closing {side} Product ID 27...")
+        print(f"CLOSING OrderID {saved_id} Product 27 Size {sz} Lots {lots} Side {side}")
 
-        # V112 FORCE CLOSE - 3 RETRY!
-        for attempt in range(3):
-            res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
-            await asyncio.sleep(3)
-            sz_check,_,_=get_real_position()
-            if abs(sz_check)<0.0000001:
-                await u.message.reply_text(f"✅ CLOSED! OrderID {saved_id} {sz} BTC Closed at {price():.1f} ✅ Attempt {attempt+1}")
-                LAST_ORDER_ID.pop(uid,None); save_data()
-                break
-            else:
-                lots = size_to_lots(sz_check)
-                side="buy" if sz_check<0 else "sell"
-                await u.message.reply_text(f"⚠️ Still open {sz_check}, retry {attempt+2}...")
-        
+        res=order({"product_id":27,"size":lots,"side":side,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
+        await asyncio.sleep(3)
         cancel_all_orders()
-        BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); IS_CLOSING[uid]=False; save_data()
+        await asyncio.sleep(1)
+
+        sz_check,_,_=get_real_position()
+        if abs(sz_check)<0.0000001:
+            await u.message.reply_text(f"✅ CLOSED! Remember OrderID {saved_id} Product 27 {sz} BTC Closed at {price():.1f} ✅")
+            print(f"========== CLOSED SUCCESS OrderID {saved_id} REMOVED FROM REMEMBER ==========")
+            LAST_ORDER_ID.pop(uid,None)
+        else:
+            lots2=size_to_lots(sz_check)
+            side2="buy" if sz_check<0 else "sell"
+            order({"product_id":27,"size":lots2,"side":side2,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
+            await asyncio.sleep(2)
+            cancel_all_orders()
+            await u.message.reply_text(f"⚠️ Retry done OrderID {saved_id}, checking...")
+            print(f"RETRY CLOSE OrderID {saved_id} Still {sz_check}")
+        
+        BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_POS_SIZE[uid]=0; LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None)
+        IS_CLOSING[uid]=False
 
     except Exception as e:
-        await u.message.reply_text(f"❌ Error {e}")
+        await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}")
+        print(f"CLOSE ERROR OrderID {saved_id} {e}")
         IS_CLOSING[u.effective_user.id]=False
         cancel_all_orders()
 
@@ -401,6 +332,6 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=30, first=15)
-    print("BOT LIVE V112 FORCE CLOSE FIXED - DANGER REMOVED"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V114 ORDER ID VISIBLE IN LOG + BOT + CLOSE - PRODUCT 27"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
