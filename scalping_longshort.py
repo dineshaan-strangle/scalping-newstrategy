@@ -8,9 +8,9 @@ S = os.getenv("DELTA_API_SECRET")
 T = os.getenv("TELEGRAM_TOKEN")
 B = "https://api.india.delta.exchange"
 BC = "https://cdn.india.deltaex.org"
-SL = 1.2  # SL %
-TP = 2.0  # TP %
-TRAIL_TP = 0.6  # TP HIT AANA APPURAM 0.6% KEEZHA VANTHA CLOSE - TRAILING!
+SL = 1.2
+TP = 2.0
+TRAIL_TP = 0.6
 
 USER_QTY = {}
 USER_LEV = {}
@@ -22,10 +22,13 @@ LAST_TP = {}
 ENTRY_TIME = {}
 IS_CLOSING = {}
 LAST_ORDER_ID = {}
-TRAILING_ACTIVE = {} # TP HIT AACHU NU TRACK!
+TRAILING_ACTIVE = {}
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V117 BOT ONLY TRAILING SL TP')
+    def do_GET(self): 
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V118 FIX HEAD 501 + BOT TRAILING')
+    def do_HEAD(self): 
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
 
 def run_health_server():
@@ -113,60 +116,50 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
             order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
             is_trailing = TRAILING_ACTIVE.get(uid, False)
             
-            # === BEST PRICE UPDATE - TRAILING LOGIC ===
-            if cur_size > 0: # LONG
+            if cur_size > 0:
                 if cur_p > best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
-                    print(f"LONG BEST UPDATE OrderID {order_id_saved} Best {best}")
-            else: # SHORT
+            else:
                 if cur_p < best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
-                    print(f"SHORT BEST UPDATE OrderID {order_id_saved} Best {best}")
 
             close_reason = None
             side_to_close = None
             
-            if cur_size > 0: # LONG POSITION
+            if cur_size > 0:
                 sl_price = entry * (1 - SL/100)
                 tp_price = entry * (1 + TP/100)
-                # 1. SL HIT - FIXED
                 if cur_p <= sl_price:
-                    close_reason = f"SL HIT {SL}% Price {cur_p} <= {sl_price:.1f}"
+                    close_reason = f"SL HIT {SL}% {cur_p:.1f} <= {sl_price:.1f}"
                     side_to_close = "sell"
-                # 2. TP TRAILING LOGIC
                 elif cur_p >= tp_price:
-                    # TP HIT - TRAILING ACTIVE AAKUTHU!
                     if not is_trailing:
                         TRAILING_ACTIVE[uid] = True
-                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\nIpo {TRAIL_TP}% keezha vantha close aagum!")
+                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{ TRAIL_TP}% reverse la close!")
                         except: pass
-                        print(f"TP HIT LONG OrderID {order_id_saved} Best {best} Entry {entry}")
-                    # TRAILING CHECK - BEST LA IRUNTHU 0.6% KEEZHA VANTHA CLOSE!
                     trail_close_price = best * (1 - TRAIL_TP/100)
                     if cur_p <= trail_close_price:
-                        close_reason = f"TP TRAIL HIT Best {best:.1f} -> {cur_p:.1f} ({TRAIL_TP}% down) OrderID {order_id_saved}"
+                        close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "sell"
-            else: # SHORT POSITION
+            else:
                 sl_price = entry * (1 + SL/100)
                 tp_price = entry * (1 - TP/100)
                 if cur_p >= sl_price:
-                    close_reason = f"SL HIT {SL}% Price {cur_p} >= {sl_price:.1f}"
+                    close_reason = f"SL HIT {SL}% {cur_p:.1f} >= {sl_price:.1f}"
                     side_to_close = "buy"
                 elif cur_p <= tp_price:
                     if not is_trailing:
                         TRAILING_ACTIVE[uid] = True
-                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\nIpo {TRAIL_TP}% mela pona close aagum!")
+                        try: await context.bot.send_message(uid, f"🎯 TP HIT! Trailing Active! Best {best:.1f} Entry {entry:.1f} OrderID {order_id_saved}\n{ TRAIL_TP}% reverse la close!")
                         except: pass
-                        print(f"TP HIT SHORT OrderID {order_id_saved} Best {best} Entry {entry}")
                     trail_close_price = best * (1 + TRAIL_TP/100)
                     if cur_p >= trail_close_price:
-                        close_reason = f"TP TRAIL HIT Best {best:.1f} -> {cur_p:.1f} ({TRAIL_TP}% up) OrderID {order_id_saved}"
+                        close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "buy"
 
             if close_reason and side_to_close:
-                print(f"CLOSING {close_reason} OrderID {order_id_saved}")
                 lots = size_to_lots(cur_size)
                 if lots < 1: lots = 1
                 order({"product_id":27,"size":lots,"side":side_to_close,"order_type":"market_order","reduce_only":"true","time_in_force":"ioc"})
@@ -176,7 +169,6 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                     try: await context.bot.send_message(uid, f"✅ CLOSED! {close_reason}\nPrice {cur_p:.1f} OrderID {order_id_saved} Product 27")
                     except: pass
                     BEST_PRICE.pop(uid,None); ENTRY_PRICE.pop(uid,None); LAST_SL.pop(uid,None); LAST_TP.pop(uid,None); LAST_POS_SIZE[uid]=0; ENTRY_TIME.pop(uid,None); LAST_ORDER_ID.pop(uid,None); TRAILING_ACTIVE.pop(uid,None)
-                    print(f"CLOSED {close_reason} OrderID {order_id_saved} REMOVED")
                 else:
                     print(f"CLOSE FAILED STILL {sz_check}")
 
@@ -190,7 +182,7 @@ async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V117 BOT TRAILING\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nRemember OrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}%\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V118 FIX HEAD + TRAIL\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}% BOT ONLY\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 def get_candles_detail(res="5"):
@@ -214,7 +206,7 @@ async def trend_cmd(u,c):
     greens=sum([1 for t in [t5,t15,t60] if "BULLISH" in t]); reds=sum([1 for t in [t5,t15,t60] if "BEARISH" in t])
     final="🚀 BULLISH - LONG" if greens>=2 else "📉 BEARISH - SHORT" if reds>=2 else "⚖️ SIDEWAYS"
     order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
-    txt=f"📊 TREND V117\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} OrderID: {order_id}\nSL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY"
+    txt=f"📊 TREND V118\nBTC: {e:.1f} Bal: ${bal:.2f}\n5M: {t5} {c5:.1f}\n15M: {t15} {c15:.1f}\n1H: {t60} {c60:.1f}\nFINAL: {final}\nPOS: {sz} OrderID: {order_id}\nSL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY HEAD FIX"
     await u.message.reply_text(txt)
 
 async def qty_cmd(u,c):
@@ -257,18 +249,16 @@ async def button(u,c):
             LAST_ORDER_ID[q.from_user.id] = order_id
             print(f"ORDER ID SAVED: {order_id} PRODUCT 27 SIZE {lots} SIDE {side} - BOT TRAILING ONLY")
         except: LAST_ORDER_ID[q.from_user.id] = int(time.time())
-        # DELTA LA SL/TP ORDER PODA VENDAM! BOT MATTUM THAN!
         ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_SL[q.from_user.id]=round(e*(1+SL/100),1) if side=="sell" else round(e*(1-SL/100),1)
         LAST_TP[q.from_user.id]=round(e*(1-TP/100),1) if side=="sell" else round(e*(1+TP/100),1)
         LAST_POS_SIZE[q.from_user.id]= -lots if side=="sell" else lots; ENTRY_TIME[q.from_user.id]=time.time(); TRAILING_ACTIVE[q.from_user.id]=False
-        await q.edit_message_text(f"{side.upper()} DONE ✅ BOT TRAILING ONLY!\nEntry {e} SL {SL}% TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nBest tracking start {e}\nProduct 27")
+        await q.edit_message_text(f"{side.upper()} DONE ✅ BOT TRAILING ONLY!\nEntry {e} SL {SL}% TP {TP}% Trail {TRAIL_TP}%\nOrderID: {LAST_ORDER_ID[q.from_user.id]}\nBest tracking start {e}\nProduct 27 HEAD FIX OK")
     except Exception as e:
         print(f"button error {e}")
 
 async def close_cmd(u,c):
     uid=u.effective_user.id; IS_CLOSING[uid]=True
     saved_id = LAST_ORDER_ID.get(uid, "No ID")
-    print(f"========== CLOSE START OrderID {saved_id} ==========")
     await u.message.reply_text(f"🔍 Searching REAL Delta...\nRemember OrderID: {saved_id}")
     try:
         sz,_,_=get_real_position()
@@ -290,7 +280,7 @@ def main():
     app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("qty", qty_cmd)); app.add_handler(CommandHandler("lev", lev_cmd))
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
-    app.job_queue.run_repeating(check_positions_job, interval=15, first=10) # 15 sec ku check - trailing ku fast!
-    print("BOT LIVE V117 BOT ONLY TRAILING SL TP - DELTA NO SL TP"); app.run_polling(drop_pending_updates=True)
+    app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
+    print("BOT LIVE V118 HEAD FIX + BOT TRAILING - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
