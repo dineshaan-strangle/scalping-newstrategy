@@ -29,7 +29,7 @@ LAST_ALERT_SIGNAL = ""
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self): 
-        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.5 SL TRAIL + NO ALERT WHEN LIVE')
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.7 ALL FIXED')
     def do_HEAD(self): 
         self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
@@ -95,6 +95,23 @@ def get_real_position():
         except: pass
         return sz, entry, upnl
     except: return 0,0,0
+
+def get_latest_order_id_from_api():
+    try:
+        h=hdr("GET","/v2/orders?product_id=27&state=open","","")
+        r=requests.get(B+"/v2/orders?product_id=27&state=open", headers=h, timeout=5).json()
+        orders = r.get('result',[])
+        if orders and len(orders)>0:
+            return str(orders[0].get('id',''))
+        h2=hdr("GET","/v2/orders?product_id=27&state=closed&page_size=5","","")
+        r2=requests.get(B+"/v2/orders?product_id=27&state=closed&page_size=5", headers=h2, timeout=5).json()
+        orders2 = r2.get('result',[])
+        if orders2 and len(orders2)>0:
+            return str(orders2[0].get('id',''))
+        return None
+    except Exception as e:
+        print(f"fetch order id error {e}")
+        return None
 
 def size_to_lots(real_size):
     if abs(real_size) < 1: return int(abs(real_size)*1000)
@@ -209,10 +226,9 @@ def calc_score(s5,s15,s60):
 async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
     global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
     try:
-        # FIX 2: ORDER LIVE LA IRUKKA ALERT VARA KUDATHU
         live_sz,_,_=get_real_position()
         if abs(live_sz)>0.0000001:
-            return  # Position open -> No alert
+            return
         if time.time() - LAST_ALERT_TIME < 180: return
         s5 = get_pro_signal("5m")
         s15 = get_pro_signal("15m")
@@ -222,10 +238,10 @@ async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
         signal=""; msg=""
         if long_pct>=70:
             signal=f"LONG_{long_pct}"
-            msg=f"🚀 AUTO ALERT V119.5\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna!"
+            msg=f"🚀 AUTO ALERT V119.7\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna!"
         elif short_pct>=70:
             signal=f"SHORT_{short_pct}"
-            msg=f"📉 AUTO ALERT V119.5\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna!"
+            msg=f"📉 AUTO ALERT V119.7\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna!"
         if signal and signal != LAST_ALERT_SIGNAL:
             all_users = ALERT_USERS.union(set(USER_QTY.keys()))
             for uid in list(all_users):
@@ -251,10 +267,13 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
             if entry == 0: continue
             best = BEST_PRICE.get(uid, entry)
             order_id_saved = LAST_ORDER_ID.get(uid, "No ID")
+            if not order_id_saved or order_id_saved=="None":
+                f = get_latest_order_id_from_api()
+                if f:
+                    order_id_saved=f
+                    LAST_ORDER_ID[uid]=f
             is_trailing = TRAILING_ACTIVE.get(uid, False)
-            
-            # FIX 1: SL TRAILING FROM ENTRY - BEST UPDATE FROM START
-            if cur_size > 0:  # LONG
+            if cur_size > 0:
                 if cur_p > best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
@@ -263,7 +282,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                         if int(cur_p) % 80 < 15:
                             await context.bot.send_message(uid, f"📈 LONG SL TRAIL\nBest {best:.1f} SL {sl_now:.1f} (+{(best-entry):.1f}$)\nEntry {entry:.1f} Order {order_id_saved}")
                     except: pass
-            else:  # SHORT
+            else:
                 if cur_p < best:
                     BEST_PRICE[uid] = cur_p
                     best = cur_p
@@ -272,11 +291,10 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                         if int(cur_p) % 80 < 15:
                             await context.bot.send_message(uid, f"📉 SHORT SL TRAIL\nBest {best:.1f} SL {sl_now:.1f} (+{(entry-best):.1f}$)\nEntry {entry:.1f} Order {order_id_saved}")
                     except: pass
-            
             close_reason = None
             side_to_close = None
-            if cur_size > 0:  # LONG
-                sl_price = best * (1 - SL/100)  # TRAILING SL
+            if cur_size > 0:
+                sl_price = best * (1 - SL/100)
                 tp_price = entry * (1 + TP/100)
                 if cur_p <= sl_price:
                     close_reason = f"SL TRAIL Best {best:.1f} SL {sl_price:.1f} <= {cur_p:.1f} OrderID {order_id_saved}"
@@ -290,7 +308,7 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                     if cur_p <= trail_close_price:
                         close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "sell"
-            else:  # SHORT
+            else:
                 sl_price = best * (1 + SL/100)
                 tp_price = entry * (1 - TP/100)
                 if cur_p >= sl_price:
@@ -305,7 +323,6 @@ async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
                     if cur_p >= trail_close_price:
                         close_reason = f"TP TRAIL Best {best:.1f} -> {cur_p:.1f} OrderID {order_id_saved}"
                         side_to_close = "buy"
-            
             if close_reason and side_to_close:
                 lots = size_to_lots(cur_size)
                 if lots < 1: lots = 1
@@ -327,15 +344,36 @@ async def start(u,c):
     ALERT_USERS.add(u.effective_user.id)
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
-    order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V119.5 SL TRAIL + NO ALERT LIVE\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% Trail from Best TP: {TP}% Trail: {TRAIL_TP}%\nLive la Alert OFF, Close ayiducha Alert ON ✅\n/cmds: /qty /lev /trend /long /short /close"
+    order_id = LAST_ORDER_ID.get(uid)
+    if not order_id and abs(sz)>0.0000001:
+        fetched = get_latest_order_id_from_api()
+        if fetched:
+            order_id = fetched
+            LAST_ORDER_ID[uid]=fetched
+            ENTRY_PRICE[uid]=entry if entry!=0 else ENTRY_PRICE.get(uid,cur)
+            BEST_PRICE[uid]=BEST_PRICE.get(uid,cur)
+        else:
+            order_id = f"LIVE-{int(sz*1000)}Lots"
+    if not order_id:
+        order_id = "None"
+    txt=f"🤖 BOT V119.7 ALL FIXED\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% Trail from Best TP: {TP}% Trail: {TRAIL_TP}%\nLive la Alert OFF, Close ayiducha Alert ON ✅\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
     ALERT_USERS.add(u.effective_user.id)
     try:
-        e=price(); bal=get_balance(); sz,_,_=get_real_position()
-        order_id = LAST_ORDER_ID.get(u.effective_user.id, "None")
+        e=price(); bal=get_balance(); sz,entry_real,upnl_real=get_real_position()
+        uid=u.effective_user.id
+        order_id = LAST_ORDER_ID.get(uid)
+        if not order_id and abs(sz)>0.0000001:
+            fetched = get_latest_order_id_from_api()
+            if fetched:
+                order_id = fetched
+                LAST_ORDER_ID[uid]=fetched
+            else:
+                order_id = f"LIVE-{int(sz*1000)}Lots"
+        if not order_id:
+            order_id = "None"
         await u.message.reply_text("📊 Loading PRO Indicators... 5m/15m/1h")
         s5 = get_pro_signal("5m")
         s15 = get_pro_signal("15m")
@@ -348,8 +386,9 @@ async def trend_cmd(u,c):
         else: final=f"⚖️ SIDEWAYS - WAIT {long_pct}%/{short_pct}%"
         def icon(sig): return "🟢" if "BULL" in sig else "🔴" if "BEAR" in sig else "⚪"
         def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
-        txt=f"""📊 TREND V119.5 PRO FIXED
-BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
+        txt=f"""📊 TREND V119.7
+BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz} UPNL ${upnl_real:.2f}
+Entry: {entry_real:.1f}
 
 5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
    EMA9 {s5['ema9']:.1f} vs EMA21 {s5['ema21']:.1f}
@@ -385,6 +424,9 @@ async def ask_perm(u, side):
     sz,entry,upnl=get_real_position()
     if abs(sz)>0.0000001:
         oid = LAST_ORDER_ID.get(u.effective_user.id, "Unknown")
+        if oid=="None" or not oid:
+            f=get_latest_order_id_from_api()
+            oid = f if f else f"LIVE-{int(sz*1000)}Lots"
         await u.message.reply_text(f"❌ Already have position {sz} BTC Entry {entry} OrderID {oid}\nClose first with /close Anna!")
         return
     lots=USER_QTY.get(u.effective_user.id,1); e=price()
@@ -401,6 +443,9 @@ async def button(u,c):
         sz_check,_,_=get_real_position()
         if abs(sz_check)>0.0000001:
             oid = LAST_ORDER_ID.get(q.from_user.id, "Unknown")
+            if oid=="None" or not oid:
+                f=get_latest_order_id_from_api()
+                oid = f if f else f"LIVE-{int(sz_check*1000)}Lots"
             await q.edit_message_text(f"❌ Blocked! Already have position {sz_check} BTC OrderID {oid}! Use /close first!")
             return
         lots=USER_QTY.get(q.from_user.id,1); e=price()
@@ -425,6 +470,9 @@ async def close_cmd(u,c):
     ALERT_USERS.add(u.effective_user.id)
     uid=u.effective_user.id; IS_CLOSING[uid]=True
     saved_id = LAST_ORDER_ID.get(uid, "No ID")
+    if saved_id=="None" or not saved_id:
+        f=get_latest_order_id_from_api()
+        saved_id = f if f else saved_id
     await u.message.reply_text(f"🔍 Searching REAL Delta...\nRemember OrderID: {saved_id}")
     try:
         sz,_,_=get_real_position()
@@ -442,12 +490,18 @@ async def close_cmd(u,c):
         await u.message.reply_text(f"❌ Error {e} OrderID {saved_id}"); IS_CLOSING[u.effective_user.id]=False
 
 def main():
+    try:
+        requests.get(f"https://api.telegram.org/bot{T}/deleteWebhook?drop_pending_updates=true", timeout=10)
+        print("Webhook Deleted ✅")
+        time.sleep(2)
+    except Exception as e:
+        print(f"Webhook delete error {e}")
     app=Application.builder().token(T).build()
     app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("qty", qty_cmd)); app.add_handler(CommandHandler("lev", lev_cmd))
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
     app.job_queue.run_repeating(auto_alert_job, interval=120, first=30)
-    print("BOT LIVE V119.5 SL TRAIL + NO ALERT WHEN LIVE"); app.run_polling(drop_pending_updates=True)
+    print("BOT LIVE V119.7 ALL FIXED"); app.run_polling(drop_pending_updates=True, allowed_updates=["message","callback_query"])
 
 if __name__=="__main__": main()
