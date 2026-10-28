@@ -23,10 +23,12 @@ ENTRY_TIME = {}
 IS_CLOSING = {}
 LAST_ORDER_ID = {}
 TRAILING_ACTIVE = {}
+LAST_ALERT_TIME = 0
+LAST_ALERT_SIGNAL = ""
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self): 
-        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119 PRO MANUAL NO AUTO')
+        self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b'BOT OK V119.1 PRO MANUAL + AUTO 70% ALERT')
     def do_HEAD(self): 
         self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers()
     def log_message(self, format, *args): return
@@ -97,11 +99,10 @@ def size_to_lots(real_size):
     if abs(real_size) < 1: return int(abs(real_size)*1000)
     else: return int(abs(real_size))
 
-# ===== V119 PRO INDICATOR FUNCTIONS - NO AUTO =====
+# ===== V119 PRO INDICATOR =====
 def fetch_candles_full(res="5m", count=100):
     try:
         now=int(time.time())
-        # 5m 100 candle = 500 min ~ 8 hours
         secs = {"1m":60,"5m":300,"15m":900,"1h":3600}
         frm = now - (secs.get(res,300)*count) - 100
         url=f"{BC}/v2/history/candles"; params={"resolution":res,"symbol":"BTCUSD","start":frm,"end":now}
@@ -131,13 +132,11 @@ def calc_rsi(prices, period=14):
     if losses==0: return 70 if gains>0 else 50
     rs = (gains/period)/(losses/period)
     rsi = 100 - (100/(1+rs))
-    # Wilder smoothing for last value
     return round(rsi,1)
 
 def calc_supertrend(closes, highs, lows, period=10, mult=3):
     try:
         if len(closes)<period: return "SIDE", closes[-1] if closes else 0
-        # ATR
         tr_list=[]
         for i in range(1,len(closes)):
             tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
@@ -149,16 +148,14 @@ def calc_supertrend(closes, highs, lows, period=10, mult=3):
         if closes[-1] > upper: return "GREEN BULLISH", lower
         elif closes[-1] < lower: return "RED BEARISH", upper
         else:
-            # Check prev trend
             if closes[-1] > closes[-2]: return "GREEN BULLISH", lower
             else: return "RED BEARISH", upper
     except: return "SIDE", 0
 
 def get_pro_signal(res_label):
-    # res_label: 5m,15m,1h
     closes,highs,lows = fetch_candles_full(res_label, 100)
     if len(closes)<25:
-        return {"ema": "SIDE", "rsi":50, "st":"SIDE", "price":price()}
+        return {"ema9":0,"ema21":0,"ema_sig":"SIDEWAYS","rsi":50,"st":"SIDE","st_val":0,"price":price()}
     ema9 = calc_ema(closes,9)
     ema21 = calc_ema(closes,21)
     rsi = calc_rsi(closes,14)
@@ -166,6 +163,53 @@ def get_pro_signal(res_label):
     cur = closes[-1]
     ema_sig = "BULLISH" if ema9>ema21 else "BEARISH" if ema9<ema21 else "SIDEWAYS"
     return {"ema9":ema9,"ema21":ema21,"ema_sig":ema_sig,"rsi":rsi,"st":st_trend,"st_val":st_val,"price":cur}
+
+def calc_score(s5,s15,s60):
+    long_score=0; short_score=0
+    if s5['ema_sig']=="BULLISH": long_score+=20
+    elif s5['ema_sig']=="BEARISH": short_score+=20
+    if s5['rsi']<35: long_score+=15
+    elif s5['rsi']>65: short_score+=15
+    if "GREEN" in s5['st']: long_score+=15
+    elif "RED" in s5['st']: short_score+=15
+    if s15['ema_sig']=="BULLISH": long_score+=12
+    elif s15['ema_sig']=="BEARISH": short_score+=12
+    if "GREEN" in s15['st']: long_score+=18
+    elif "RED" in s15['st']: short_score+=18
+    if s60['ema_sig']=="BULLISH": long_score+=10
+    elif s60['ema_sig']=="BEARISH": short_score+=10
+    if "GREEN" in s60['st']: long_score+=10
+    elif "RED" in s60['st']: short_score+=10
+    total=long_score+short_score
+    if total==0: return 50,50
+    long_pct=int(long_score/total*100)
+    return long_pct, 100-long_pct
+
+async def auto_alert_job(context: ContextTypes.DEFAULT_TYPE):
+    global LAST_ALERT_TIME, LAST_ALERT_SIGNAL
+    try:
+        if time.time() - LAST_ALERT_TIME < 300: return
+        s5 = get_pro_signal("5m")
+        s15 = get_pro_signal("15m")
+        s60 = get_pro_signal("1h")
+        long_pct, short_pct = calc_score(s5,s15,s60)
+        cur = price()
+        signal=""; msg=""
+        if long_pct>=70:
+            signal=f"LONG_{long_pct}"
+            msg=f"🚀 AUTO ALERT V119.1\nBTC: {cur:.1f}\nLONG {long_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /long adikkalam Anna! CONFIDENCE {long_pct}%"
+        elif short_pct>=70:
+            signal=f"SHORT_{short_pct}"
+            msg=f"📉 AUTO ALERT V119.1\nBTC: {cur:.1f}\nSHORT {short_pct}% STRONG! 🔥\n5M: {s5['ema_sig']} RSI {s5['rsi']} ST {s5['st']}\n15M: {s15['ema_sig']} ST {s15['st']}\n1H: {s60['ema_sig']} RSI {s60['rsi']}\n\n💡 /short adikkalam Anna! CONFIDENCE {short_pct}%"
+        if signal and signal != LAST_ALERT_SIGNAL:
+            for uid in list(USER_QTY.keys()):
+                try: await context.bot.send_message(uid, msg)
+                except: pass
+            LAST_ALERT_TIME=time.time()
+            LAST_ALERT_SIGNAL=signal
+            print(f"ALERT SENT {signal}")
+    except Exception as e:
+        print(f"auto_alert error {e}")
 
 async def check_positions_job(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -243,7 +287,7 @@ async def start(u,c):
     uid=u.effective_user.id; qty=USER_QTY.get(uid,1); lev=USER_LEV.get(uid,20)
     bal=get_balance(); cur=price(); sz,entry,upnl=get_real_position()
     order_id = LAST_ORDER_ID.get(uid, "None")
-    txt=f"🤖 BOT V119 PRO MANUAL\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}% BOT ONLY\nNO AUTO - Manual Only!\n/cmds: /qty /lev /trend /long /short /close"
+    txt=f"🤖 BOT V119.1 PRO MANUAL + AUTO 70%\nBal: ${bal:.2f} BTC: {cur:.1f}\nQTY: {qty} Lot Lev: {lev}x\nPOS: {sz} Entry {entry} UPNL ${upnl:.2f}\nOrderID: {order_id}\nSL: {SL}% TP: {TP}% Trail: {TRAIL_TP}%\nAuto Alert: 70%+ LONG/SHORT bot sollum!\n/cmds: /qty /lev /trend /long /short /close"
     await u.message.reply_text(txt)
 
 async def trend_cmd(u,c):
@@ -254,44 +298,15 @@ async def trend_cmd(u,c):
         s5 = get_pro_signal("5m")
         s15 = get_pro_signal("15m")
         s60 = get_pro_signal("1h")
-
-        # Scoring
-        long_score=0; short_score=0
-        # 5M - 50% weight
-        if s5['ema_sig']=="BULLISH": long_score+=20
-        elif s5['ema_sig']=="BEARISH": short_score+=20
-        if s5['rsi']<35: long_score+=15
-        elif s5['rsi']>65: short_score+=15
-        if "GREEN" in s5['st']: long_score+=15
-        elif "RED" in s5['st']: short_score+=15
-        
-        # 15M - 30% weight
-        if s15['ema_sig']=="BULLISH": long_score+=12
-        elif s15['ema_sig']=="BEARISH": short_score+=12
-        if "GREEN" in s15['st']: long_score+=18
-        elif "RED" in s15['st']: short_score+=18
-
-        # 1H - 20% weight
-        if s60['ema_sig']=="BULLISH": long_score+=10
-        elif s60['ema_sig']=="BEARISH": short_score+=10
-        if "GREEN" in s60['st']: long_score+=10
-        elif "RED" in s60['st']: short_score+=10
-
-        total = long_score+short_score
-        long_pct = int(long_score/total*100) if total>0 else 50
-        short_pct = 100-long_pct
-
-        if long_pct>=70: final="🚀 STRONG BULLISH - LONG 70%+"
-        elif short_pct>=70: final="📉 STRONG BEARISH - SHORT 70%+"
-        elif long_pct>=55: final="🟢 BULLISH - LONG Fav"
-        elif short_pct>=55: final="🔴 BEARISH - SHORT Fav"
-        else: final="⚖️ SIDEWAYS - WAIT"
-
-        # Icons
+        long_pct, short_pct = calc_score(s5,s15,s60)
+        if long_pct>=70: final=f"🚀 STRONG BULLISH - LONG {long_pct}%"
+        elif short_pct>=70: final=f"📉 STRONG BEARISH - SHORT {short_pct}%"
+        elif long_pct>=55: final=f"🟢 BULLISH - LONG Fav {long_pct}%"
+        elif short_pct>=55: final=f"🔴 BEARISH - SHORT Fav {short_pct}%"
+        else: final=f"⚖️ SIDEWAYS - WAIT {long_pct}%/{short_pct}%"
         def icon(sig): return "🟢" if "BULL" in sig else "🔴" if "BEAR" in sig else "⚪"
         def st_icon(st): return "🟢" if "GREEN" in st else "🔴" if "RED" in st else "⚪"
-
-        txt=f"""📊 TREND V119 PRO MANUAL
+        txt=f"""📊 TREND V119.1 PRO
 BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
 
 5M: {icon(s5['ema_sig'])} {s5['ema_sig']} 
@@ -308,7 +323,7 @@ BTC: {e:.1f} Bal: ${bal:.2f} POS: {sz}
 FINAL: {final}
 LONG {long_pct}% | SHORT {short_pct}%
 OrderID: {order_id}
-💡 Manual Only: {final} vantha /long or /short adinga!
+💡 70%+ vantha Auto Alert Varum! Manual Only /long /short
 SL {SL}% TP {TP}% Trail {TRAIL_TP}% BOT ONLY
 """
         await u.message.reply_text(txt)
@@ -353,7 +368,6 @@ async def button(u,c):
             order_id = res.get('result', {}).get('id', 0)
             if not order_id: order_id = int(time.time())
             LAST_ORDER_ID[q.from_user.id] = order_id
-            print(f"ORDER ID SAVED: {order_id} PRODUCT 27 SIZE {lots} SIDE {side} - BOT TRAILING ONLY")
         except: LAST_ORDER_ID[q.from_user.id] = int(time.time())
         ENTRY_PRICE[q.from_user.id]=e; BEST_PRICE[q.from_user.id]=e; LAST_SL[q.from_user.id]=round(e*(1+SL/100),1) if side=="sell" else round(e*(1-SL/100),1)
         LAST_TP[q.from_user.id]=round(e*(1-TP/100),1) if side=="sell" else round(e*(1+TP/100),1)
@@ -387,6 +401,7 @@ def main():
     app.add_handler(CommandHandler("trend", trend_cmd)); app.add_handler(CommandHandler("short", short_cmd)); app.add_handler(CommandHandler("long", long_cmd))
     app.add_handler(CommandHandler("close", close_cmd)); app.add_handler(CallbackQueryHandler(button))
     app.job_queue.run_repeating(check_positions_job, interval=15, first=10)
-    print("BOT LIVE V119 PRO MANUAL NO AUTO - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
+    app.job_queue.run_repeating(auto_alert_job, interval=120, first=60)
+    print("BOT LIVE V119.1 PRO MANUAL + AUTO 70% ALERT - UPTIMEROBOT OK"); app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
